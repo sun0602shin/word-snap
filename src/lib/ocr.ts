@@ -201,7 +201,7 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
   const seen = new Set<string>();
   return out
     .filter((w) => (seen.has(w.en + "|" + w.ko) ? false : (seen.add(w.en + "|" + w.ko), true)))
-    .map(({ id, en, ko, uncertain }) => ({ id, en, ko, uncertain }));
+    .map(({ id, en, ko, uncertain }) => ({ id, en, ko, uncertain: !!uncertain }));
 }
 
 export async function recognizeVocab(file: Blob, rotation: number, onStage: (s: OcrStage) => void): Promise<Word[]> {
