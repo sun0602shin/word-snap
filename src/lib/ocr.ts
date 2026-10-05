@@ -29,7 +29,7 @@ export function getWorker(): Promise<TWorker> {
           stageCb?.({ label: STAGE_KO[m.status] ?? "처리 중", progress: m.progress ?? 0 }),
       });
       await w.setParameters({
-        tessedit_pageseg_mode: (globalThis as { __psm?: string }).__psm as never ?? T.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode: T.PSM.SPARSE_TEXT,
         preserve_interword_spaces: "1",
         user_defined_dpi: "300",
       });
@@ -105,6 +105,7 @@ export async function preprocess(file: Blob, rotation = 0): Promise<HTMLCanvasEl
 }
 
 /* ---------- table pairing ---------- */
+export type Cand = Word & { box: { x0: number; y0: number; x1: number; y1: number } };
 type Tok = { t: string; conf: number; x0: number; x1: number; y0: number; y1: number; kind: "en" | "ko" | "punct" | "noise" };
 const HANGUL = /[가-힣]/;
 const EN_RE = /^[A-Za-z][A-Za-z'-]*$/;
@@ -117,7 +118,7 @@ function classify(raw: string, conf: number): Tok["kind"] {
   return "noise";
 }
 
-export function pairTokens(words: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[], pageH: number): Word[] {
+export function pairTokens(words: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[], pageH: number): Cand[] {
   const toks: Tok[] = words
     .map((w) => ({ t: w.text.trim(), conf: w.confidence, ...w.bbox, kind: classify(w.text.trim(), w.confidence) }))
     .filter((t) => t.t && t.kind !== "noise" && !/^day$/i.test(t.t.replace(/[^A-Za-z]/g, "")) && !/^qr$/i.test(t.t));
@@ -136,7 +137,7 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
     else { rows.push([t]); cy = yc; }
   }
 
-  type Pair = { en: Tok[]; ko: Tok[]; y: number };
+  type Pair = { en: Tok[]; ko: Tok[]; y: number; y0?: number; y1?: number; xEnd?: number };
   const pageW = Math.max(...toks.map((t) => t.x1));
   const pairs: Pair[] = [];
   let prevRowPairs: Pair[] = [];
@@ -164,10 +165,12 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
       const target = prevRowPairs.find((p) => p.ko.length && Math.abs((p.ko[0]?.x0 ?? 0) - x) < mh * 6);
       if (target) target.ko.push(...leftovers);
     }
+    const ry0 = Math.min(...row.map((t) => t.y0)), ry1 = Math.max(...row.map((t) => t.y1));
+    rowPairs.forEach((rp, k) => { rp.y0 = ry0; rp.y1 = ry1; rp.xEnd = rowPairs[k + 1]?.en[0]!.x0 ?? pageW; });
     if (rowPairs.length) { pairs.push(...rowPairs); prevRowPairs = rowPairs; }
   }
 
-  const out: (Word & { x: number; y: number })[] = [];
+  const out: (Cand & { x: number; y: number })[] = [];
   for (const p of pairs) {
     const en = p.en.map((t) => t.t.replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "")).join(" ").toLowerCase();
     const koToks = p.ko.filter((t) => !(t.kind === "punct" && /^[.:;]$/.test(t.t)));
@@ -189,7 +192,8 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
     if (!hasKo && en.length < 3) continue;
     const enConf = Math.min(...p.en.map((t) => t.conf));
     const koConf = koToks.length ? koToks.reduce((s, t) => s + t.conf, 0) / koToks.length : 0;
-    out.push({ id: uid(), en, ko, uncertain: !hasKo || latinNoise || enConf < 70 || koConf < 60, x: p.en[0]!.x0, y: p.y } as Word & { x: number; y: number });
+    out.push({ id: uid(), en, ko, uncertain: !hasKo || latinNoise || enConf < 70 || koConf < 60, x: p.en[0]!.x0, y: p.y,
+      box: { x0: p.en[p.en.length - 1]!.x1 + mh * 0.3, x1: p.xEnd! - mh * 0.3, y0: p.y0! - mh * 0.35, y1: p.y1! + mh * 0.35 } });
   }
   // order by column (section) then row: cluster English start x positions
   const xs = [...new Set(out.map((w) => w.x))].sort((a, b) => a - b);
@@ -201,7 +205,15 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
   const seen = new Set<string>();
   return out
     .filter((w) => (seen.has(w.en + "|" + w.ko) ? false : (seen.add(w.en + "|" + w.ko), true)))
-    .map(({ id, en, ko, uncertain }) => ({ id, en, ko, uncertain: !!uncertain }));
+    .map(({ id, en, ko, uncertain, box }) => ({ id, en, ko, uncertain: !!uncertain, box }));
+}
+
+/** Keep Korean, commas, slashes, parentheses, tildes; drop row numbers / stray latin. */
+export function cleanMeaning(raw: string): string {
+  let s = raw.replace(/\n/g, " ").replace(/[|_\[\]{}<>]/g, " ");
+  s = s.replace(/(^|\s)[A-Za-z0-9]+(?=\s|$)/g, " ").replace(/\d+/g, " ");
+  s = s.replace(/\s+([,)])/g, "$1").replace(/\(\s+/g, "(").replace(/\s*\/\s*/g, " / ").replace(/,(?=\S)/g, ", ");
+  return s.replace(/\s+/g, " ").replace(/^[\s,./:;-]+|[\s,/:;-]+$/g, "").trim();
 }
 
 export async function recognizeVocab(file: Blob, rotation: number, onStage: (s: OcrStage) => void): Promise<Word[]> {
@@ -217,7 +229,35 @@ export async function recognizeVocab(file: Blob, rotation: number, onStage: (s: 
     const words: Parameters<typeof pairTokens>[0] = [];
     for (const b of data.blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) for (const w of l.words ?? []) words.push(w);
     onStage({ label: "단어 정리 중", progress: 1 });
-    return pairTokens(words, canvas.height);
+    const cands = pairTokens(words, canvas.height);
+    // Pass 2: re-read each meaning cell as a single text line (much better for Korean)
+    const T = await import("tesseract.js");
+    await worker.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE });
+    try {
+      for (let i = 0; i < cands.length; i++) {
+        onStage({ label: `뜻 다시 읽는 중 (${i + 1}/${cands.length})`, progress: (i + 1) / cands.length });
+        const c = cands[i]!;
+        const b = c.box;
+        const x0 = Math.max(0, Math.round(b.x0)), y0 = Math.max(0, Math.round(b.y0));
+        const w = Math.min(canvas.width, Math.round(b.x1)) - x0, h = Math.min(canvas.height, Math.round(b.y1)) - y0;
+        if (w < 10 || h < 8) continue;
+        const crop = document.createElement("canvas");
+        crop.width = w + 40; crop.height = h + 40;
+        const cx = crop.getContext("2d")!;
+        cx.fillStyle = "#fff"; cx.fillRect(0, 0, crop.width, crop.height);
+        cx.drawImage(canvas, x0, y0, w, h, 20, 20, w, h);
+        const r = await worker.recognize(crop);
+        const line = cleanMeaning(r.data.text);
+        const hc = (s: string) => (s.match(/[가-힣]/g) ?? []).length;
+        if (hc(line) >= Math.max(1, hc(c.ko) * 0.7) && r.data.confidence >= 45) {
+          c.ko = line;
+          c.uncertain = r.data.confidence < 70;
+        }
+      }
+    } finally {
+      await worker.setParameters({ tessedit_pageseg_mode: T.PSM.SPARSE_TEXT });
+    }
+    return cands.map(({ id, en, ko, uncertain }) => ({ id, en, ko, uncertain: !!uncertain }));
   } catch (e) {
     await resetWorker();
     throw e;
