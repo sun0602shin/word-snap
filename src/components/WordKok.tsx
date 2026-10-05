@@ -9,7 +9,7 @@ export function WordKok() {
   const [words, setWords] = useState<Word[]>([]);
   const [quizSet, setQuizSet] = useState<Word[]>([]);
   const [stats, setStats] = useState<Record<string, Stat>>({});
-  const [ocr, setOcr] = useState<{ busy: boolean; p: number; err?: string }>({ busy: false, p: 0 });
+  const [ocr, setOcr] = useState<{ busy: boolean; p: number; err?: string | undefined }>({ busy: false, p: 0 });
 
   useEffect(() => setWords(store.words()), []);
   const save = (w: Word[]) => { setWords(w); store.setWords(w); };
@@ -130,7 +130,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
   );
 }
 
-function Editor({ words, onChange, error, onBack, onStart }: { words: Word[]; onChange: (w: Word[]) => void; error?: string; onBack: () => void; onStart: () => void }) {
+function Editor({ words, onChange, error, onBack, onStart }: { words: Word[]; onChange: (w: Word[]) => void; error?: string | undefined; onBack: () => void; onStart: () => void }) {
   const unsure = words.filter((w) => w.uncertain).length;
   const valid = words.filter((w) => w.en.trim() && w.ko.trim()).length;
   const upd = (id: string, patch: Partial<Word>) => onChange(words.map((w) => (w.id === id ? { ...w, ...patch, uncertain: false } : w)));
@@ -180,7 +180,7 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
     if (fb) return next();
     if (!answer.trim()) return;
     const ok = normalize(answer) === normalize(cur.en);
-    setStats((s) => ({ ...s, [cur.id]: ok ? { ...s[cur.id], solved: true } : { ...s[cur.id], wrong: s[cur.id]!.wrong + 1 } }));
+    setStats((s) => ({ ...s, [cur.id]: ok ? { wrong: s[cur.id]!.wrong, solved: true } : { solved: false, wrong: s[cur.id]!.wrong + 1 } }));
     setFb({ ok });
   }
   function next() {
