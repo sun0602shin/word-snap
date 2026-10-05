@@ -1,31 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { normalize, runOcr, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
+import { normalize, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
+import { getWorker, recognizeVocab, type OcrStage } from "@/lib/ocr";
 
 type Stat = { wrong: number; solved: boolean };
-type View = "home" | "edit" | "quiz" | "result";
+type View = "home" | "photo" | "edit" | "quiz" | "result";
 
 export function WordKok() {
   const [view, setView] = useState<View>("home");
   const [words, setWords] = useState<Word[]>([]);
   const [quizSet, setQuizSet] = useState<Word[]>([]);
   const [stats, setStats] = useState<Record<string, Stat>>({});
-  const [ocr, setOcr] = useState<{ busy: boolean; p: number; err?: string | undefined }>({ busy: false, p: 0 });
+  const [file, setFile] = useState<File | null>(null);
+  const [err, setErr] = useState<string | undefined>();
 
   useEffect(() => setWords(store.words()), []);
   const save = (w: Word[]) => { setWords(w); store.setWords(w); };
 
-  async function handleFile(f?: File) {
+  function handleFile(f?: File) {
     if (!f) return;
-    setOcr({ busy: true, p: 0 });
-    try {
-      const res = await runOcr(f, (p) => setOcr({ busy: true, p }));
-      save(res);
-      setOcr({ busy: false, p: 1, err: res.length ? undefined : "단어를 찾지 못했어요. 직접 입력해 주세요." });
-    } catch {
-      save([]);
-      setOcr({ busy: false, p: 0, err: "글자 인식에 실패했어요. 직접 입력해 주세요." });
-    }
-    setView("edit");
+    setFile(f);
+    setView("photo");
+    getWorker().catch(() => {}); // warm up engine while the user checks the photo
   }
 
   function startQuiz(list: Word[]) {
@@ -38,14 +33,70 @@ export function WordKok() {
   return (
     <div className="mx-auto min-h-dvh max-w-2xl px-4 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
       {view === "home" && (
-        <Home busy={ocr.busy} progress={ocr.p} saved={words.length} onFile={handleFile}
-          onSample={() => { save(sampleWords()); setOcr({ busy: false, p: 0 }); setView("edit"); }}
-          onManual={() => { save([]); setOcr({ busy: false, p: 0 }); setView("edit"); }}
-          onContinue={() => setView("edit")} />
+        <Home busy={false} progress={0} saved={words.length} onFile={handleFile}
+          onSample={() => { save(sampleWords()); setErr(undefined); setView("edit"); }}
+          onManual={() => { save([]); setErr(undefined); setView("edit"); }}
+          onContinue={() => { setErr(undefined); setView("edit"); }} />
       )}
-      {view === "edit" && <Editor words={words} onChange={save} error={ocr.err} onBack={() => setView("home")} onStart={() => startQuiz(words)} />}
+      {view === "photo" && file && (
+        <PhotoStep file={file} onCancel={() => setView("home")}
+          onDone={(res, e) => { save(res); setErr(e); setView("edit"); }} />
+      )}
+      {view === "edit" && <Editor words={words} onChange={save} error={err} onBack={() => setView("home")} onStart={() => startQuiz(words)} />}
       {view === "quiz" && <Quiz key={quizSet.map((w) => w.id).join()} words={quizSet} onFinish={(s) => { setStats(s); setView("result"); }} />}
       {view === "result" && <Result words={quizSet} stats={stats} onRetryWrong={(w) => startQuiz(w)} onRetryAll={() => startQuiz(words)} onHome={() => setView("home")} />}
+    </div>
+  );
+}
+
+function PhotoStep({ file, onCancel, onDone }: { file: File; onCancel: () => void; onDone: (w: Word[], err?: string) => void }) {
+  const [rot, setRot] = useState(0);
+  const [url, setUrl] = useState("");
+  const [stage, setStage] = useState<OcrStage | null>(null);
+  const [sec, setSec] = useState(0);
+  useEffect(() => { const u = URL.createObjectURL(file); setUrl(u); return () => URL.revokeObjectURL(u); }, [file]);
+  useEffect(() => {
+    if (!stage) return;
+    const t = setInterval(() => setSec((s) => s + 1), 1000);
+    return () => clearInterval(t);
+  }, [!!stage]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function start() {
+    setSec(0);
+    setStage({ label: "준비 중", progress: 0 });
+    try {
+      const res = await recognizeVocab(file, rot, setStage);
+      onDone(res, res.length ? undefined : "단어를 찾지 못했어요. 사진을 다시 찍거나 직접 입력해 주세요.");
+    } catch {
+      onDone([], "글자 인식에 실패했어요. 인터넷 연결을 확인하거나 직접 입력해 주세요.");
+    }
+  }
+
+  if (stage)
+    return (
+      <div className="flex min-h-[70dvh] flex-col items-center justify-center text-center">
+        <div className="spinner mb-6" />
+        <p className="text-xl font-bold">{stage.label}</p>
+        <div className="mt-4 h-3 w-full max-w-xs overflow-hidden rounded-full bg-muted">
+          <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(4, Math.round(stage.progress * 100))}%` }} />
+        </div>
+        <p className="mt-2 text-sm text-muted-foreground">{Math.round(stage.progress * 100)}% · {sec}초</p>
+        <p className="mt-6 max-w-xs text-sm text-muted-foreground">처음 한 번은 언어 데이터를 내려받느라 30초 이상 걸릴 수 있어요. 화면을 켜 둔 채 기다려 주세요.</p>
+      </div>
+    );
+
+  return (
+    <div>
+      <Header title="사진 확인" left={<button className="btn-ghost h-11 px-3" onClick={onCancel}>‹ 처음</button>} />
+      <p className="mb-3 text-muted-foreground">글자가 바로 서 있도록 돌려 주세요. 단어장이 화면에 꽉 차고 흔들리지 않을수록 잘 읽어요.</p>
+      <div className="card flex aspect-square items-center justify-center overflow-hidden p-2">
+        {url && <img src={url} alt="선택한 단어장 사진" className="max-h-full max-w-full object-contain transition-transform" style={{ transform: `rotate(${rot}deg)` }} />}
+      </div>
+      <div className="mt-3 grid grid-cols-2 gap-3">
+        <button className="btn-soft h-14" onClick={() => setRot((r) => r - 90)}>↺ 왼쪽으로</button>
+        <button className="btn-soft h-14" onClick={() => setRot((r) => r + 90)}>↻ 오른쪽으로</button>
+      </div>
+      <button className="btn-primary mt-4 h-16 w-full text-xl" onClick={start}>글자 인식 시작</button>
     </div>
   );
 }
