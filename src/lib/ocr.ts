@@ -213,6 +213,7 @@ export function cleanMeaning(raw: string): string {
   let s = raw.replace(/\n/g, " ").replace(/[|_\[\]{}<>]/g, " ");
   s = s.replace(/(^|\s)[A-Za-z0-9]+(?=\s|$)/g, " ").replace(/\d+/g, " ");
   s = s.replace(/\s+([,)])/g, "$1").replace(/\(\s+/g, "(").replace(/\s*\/\s*/g, " / ").replace(/,(?=\S)/g, ", ");
+  s = s.replace(/(^|\s)[ㄱ-ㅣ]+(?=\s|$)/g, " ").replace(/\(\s*\)/g, " ");
   return s.replace(/\s+/g, " ").replace(/^[\s,./:;-]+|[\s,/:;-]+$/g, "").trim();
 }
 
