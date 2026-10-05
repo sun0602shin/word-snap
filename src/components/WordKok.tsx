@@ -240,7 +240,7 @@ function Result({ words, stats, onRetryWrong, onRetryAll, onHome }: { words: Wor
     if (recorded.current) return;
     recorded.current = true;
     store.record({ date: new Date().toISOString(), total, first, after, wrong: still },
-      words.filter((w) => stats[w.id]?.wrong > 0).map((w) => ({ en: w.en, ko: w.ko, n: stats[w.id]!.wrong })));
+      words.filter((w) => (stats[w.id]?.wrong ?? 0) > 0).map((w) => ({ en: w.en, ko: w.ko, n: stats[w.id]!.wrong })));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const box = (label: string, v: number, cls = "") => (
