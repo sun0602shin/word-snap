@@ -185,3 +185,8 @@
 @utility btn-primary { @apply btn-base; background: var(--primary); color: var(--primary-foreground); box-shadow: 0 8px 20px -10px var(--primary); }
 @utility btn-soft { @apply btn-base; background: var(--secondary); color: var(--secondary-foreground); }
 @utility btn-ghost { @apply btn-base; color: var(--secondary-foreground); font-weight: 600; &:active { background: var(--muted); } }
+@utility spinner {
+  width: 3.5rem; height: 3.5rem; border-radius: 9999px;
+  border: 5px solid var(--muted); border-top-color: var(--primary);
+  animation: spin 0.9s linear infinite;
+}

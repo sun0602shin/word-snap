@@ -75,44 +75,6 @@ export function parseLine(raw: string, conf = 100): Word | null {
   return { id: uid(), en, ko, uncertain };
 }
 
-async function preprocess(file: File): Promise<HTMLCanvasElement> {
-  const img = await createImageBitmap(file);
-  const scale = Math.min(2.5, 2200 / Math.max(img.width, img.height)) || 1;
-  const c = document.createElement("canvas");
-  c.width = Math.round(img.width * scale);
-  c.height = Math.round(img.height * scale);
-  const ctx = c.getContext("2d")!;
-  ctx.filter = "grayscale(1) contrast(1.4)";
-  ctx.drawImage(img, 0, 0, c.width, c.height);
-  return c;
-}
-
-export async function runOcr(file: File, onProgress: (p: number) => void): Promise<Word[]> {
-  const { createWorker } = await import("tesseract.js");
-  const worker = await createWorker(["eng", "kor"], 1, {
-    logger: (m: { status: string; progress: number }) => {
-      if (m.status === "recognizing text") onProgress(m.progress);
-    },
-  });
-  try {
-    const canvas = await preprocess(file);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data } = (await worker.recognize(canvas, {}, { blocks: true, text: true })) as any;
-    const lines: { text: string; confidence: number }[] = [];
-    for (const b of data.blocks ?? [])
-      for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) lines.push(l);
-    const src = lines.length ? lines : String(data.text || "").split("\n").map((t) => ({ text: t, confidence: data.confidence ?? 60 }));
-    const out: Word[] = [];
-    for (const l of src) {
-      const w = parseLine(l.text, l.confidence);
-      if (w) out.push(w);
-    }
-    return out;
-  } finally {
-    await worker.terminate();
-  }
-}
-
 /* ---------- local storage ---------- */
 export type Session = { date: string; total: number; first: number; after: number; wrong: number };
 export type Weak = Record<string, { ko: string; wrong: number }>;
