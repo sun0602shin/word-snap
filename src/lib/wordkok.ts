@@ -50,7 +50,7 @@ export function shuffle<T>(a: T[]): T[] {
   const b = [...a];
   for (let i = b.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [b[i], b[j]] = [b[j], b[i]];
+    [b[i], b[j]] = [b[j]!, b[i]!];
   }
   return b;
 }
@@ -67,9 +67,9 @@ export function parseLine(raw: string, conf = 100): Word | null {
   line = line.replace(/^[\s\d.,)\-:•·□☐✓✔vV]{0,6}(?=[A-Za-z])/, "");
   const m = line.match(/^([A-Za-z][A-Za-z'\- ]*[A-Za-z])\s*(.*)$/);
   if (!m) return null;
-  const en = m[1].trim().toLowerCase();
+  const en = m[1]!.trim().toLowerCase();
   if (/^day$/i.test(en) || en.length < 2) return null;
-  let ko = m[2].replace(/^[\s\d.,:\-]+/, "").replace(/\s*\d+\s*$/, "").trim();
+  let ko = (m[2] ?? "").replace(/^[\s\d.,:\-]+/, "").replace(/\s*\d+\s*$/, "").trim();
   ko = ko.replace(/\s*,\s*/g, ", ").replace(/\s*\/\s*/g, " / ");
   const uncertain = conf < 75 || !HANGUL.test(ko) || /[^A-Za-z'\- ]/.test(en) || en.split(" ").length > 3;
   return { id: uid(), en, ko, uncertain };

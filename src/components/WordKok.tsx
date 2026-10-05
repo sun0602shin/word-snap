@@ -170,7 +170,7 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
   const [fb, setFb] = useState<null | { ok: boolean }>(null);
   const input = useRef<HTMLInputElement>(null);
   const nextBtn = useRef<HTMLButtonElement>(null);
-  const cur = byId[queue[0]];
+  const cur = byId[queue[0]!]!;
   const solved = Object.values(stats).filter((s) => s.solved).length;
 
   useEffect(() => { (fb ? nextBtn : input).current?.focus(); }, [fb, queue]);
@@ -180,7 +180,7 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
     if (fb) return next();
     if (!answer.trim()) return;
     const ok = normalize(answer) === normalize(cur.en);
-    setStats((s) => ({ ...s, [cur.id]: ok ? { ...s[cur.id], solved: true } : { ...s[cur.id], wrong: s[cur.id].wrong + 1 } }));
+    setStats((s) => ({ ...s, [cur.id]: ok ? { ...s[cur.id], solved: true } : { ...s[cur.id], wrong: s[cur.id]!.wrong + 1 } }));
     setFb({ ok });
   }
   function next() {
@@ -204,7 +204,7 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
       </div>
 
       <div className="card flex min-h-56 flex-col items-center justify-center p-6 text-center">
-        {stats[cur.id].wrong > 0 && <span className="mb-2 rounded-full bg-warning/20 px-3 py-1 text-sm font-semibold text-warning-foreground">다시 도전!</span>}
+        {stats[cur.id]!.wrong > 0 && <span className="mb-2 rounded-full bg-warning/20 px-3 py-1 text-sm font-semibold text-warning-foreground">다시 도전!</span>}
         <p className="text-3xl font-bold leading-snug sm:text-4xl">{cur.ko}</p>
       </div>
 
@@ -230,17 +230,17 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
 
 function Result({ words, stats, onRetryWrong, onRetryAll, onHome }: { words: Word[]; stats: Record<string, Stat>; onRetryWrong: (w: Word[]) => void; onRetryAll: () => void; onHome: () => void }) {
   const total = words.length;
-  const first = words.filter((w) => stats[w.id]?.solved && !stats[w.id].wrong).length;
-  const after = words.filter((w) => stats[w.id]?.solved && stats[w.id].wrong > 0).length;
+  const first = words.filter((w) => stats[w.id]?.solved && !stats[w.id]!.wrong).length;
+  const after = words.filter((w) => stats[w.id]?.solved && stats[w.id]!.wrong > 0).length;
   const still = total - first - after;
-  const wrongWords = words.filter((w) => !stats[w.id]?.solved || stats[w.id].wrong > 0);
+  const wrongWords = words.filter((w) => !stats[w.id]?.solved || stats[w.id]!.wrong > 0);
   const rate = total ? Math.round((first / total) * 100) : 0;
   const recorded = useRef(false);
   useEffect(() => {
     if (recorded.current) return;
     recorded.current = true;
     store.record({ date: new Date().toISOString(), total, first, after, wrong: still },
-      words.filter((w) => stats[w.id]?.wrong > 0).map((w) => ({ en: w.en, ko: w.ko, n: stats[w.id].wrong })));
+      words.filter((w) => stats[w.id]?.wrong > 0).map((w) => ({ en: w.en, ko: w.ko, n: stats[w.id]!.wrong })));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const box = (label: string, v: number, cls = "") => (
@@ -266,7 +266,7 @@ function Result({ words, stats, onRetryWrong, onRetryAll, onHome }: { words: Wor
             {wrongWords.sort((a, b) => (stats[b.id]?.wrong ?? 0) - (stats[a.id]?.wrong ?? 0)).map((w) => (
               <li key={w.id} className="flex items-center justify-between gap-3 py-2">
                 <span><b>{w.en}</b> <span className="text-sm text-muted-foreground">{w.ko}</span></span>
-                <span className="shrink-0 text-sm font-semibold">{stats[w.id]?.solved ? <span className="text-destructive">{stats[w.id].wrong}회</span> : <span className="text-muted-foreground">미완료 · {stats[w.id]?.wrong ?? 0}회</span>}</span>
+                <span className="shrink-0 text-sm font-semibold">{stats[w.id]?.solved ? <span className="text-destructive">{stats[w.id]!.wrong}회</span> : <span className="text-muted-foreground">미완료 · {stats[w.id]?.wrong ?? 0}회</span>}</span>
               </li>
             ))}
           </ul>
