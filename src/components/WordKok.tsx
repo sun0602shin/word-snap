@@ -185,7 +185,7 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
   }
   function next() {
     const [head, ...rest] = queue;
-    const nq = fb?.ok ? rest : [...rest, head];
+    const nq = fb?.ok ? rest : [...rest, head!];
     setFb(null); setAnswer("");
     if (!nq.length) return onFinish(stats);
     setQueue(nq);
