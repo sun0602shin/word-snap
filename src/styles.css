@@ -132,13 +132,56 @@
   --sidebar-ring: oklch(0.551 0.027 264.364);
 }
 
-@layer base {
-  * {
-    border-color: var(--color-border);
-  }
+:root {
+  --radius: 1rem;
+  --background: oklch(0.97 0.006 120);
+  --foreground: oklch(0.22 0.02 140);
+  --card: oklch(1 0 0);
+  --primary: oklch(0.68 0.19 142);
+  --primary-foreground: oklch(1 0 0);
+  --muted: oklch(0.93 0.01 130);
+  --muted-foreground: oklch(0.52 0.02 140);
+  --secondary: oklch(0.93 0.04 142);
+  --secondary-foreground: oklch(0.35 0.1 142);
+  --destructive: oklch(0.6 0.22 25);
+  --success: oklch(0.6 0.17 145);
+  --warning: oklch(0.8 0.16 80);
+  --warning-foreground: oklch(0.5 0.12 65);
+  --border: oklch(0.91 0.01 130);
+  --ring: oklch(0.68 0.19 142);
+  --shadow-card: 0 1px 2px oklch(0 0 0 / 4%), 0 6px 20px -8px oklch(0.3 0.05 140 / 15%);
+}
 
+@theme inline {
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --shadow-card: var(--shadow-card);
+  --font-sans: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Pretendard", "Noto Sans KR", sans-serif;
+}
+
+@layer base {
+  * { border-color: var(--color-border); -webkit-tap-highlight-color: transparent; }
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
   }
 }
+
+@utility card { background: var(--card); border-radius: 1.25rem; box-shadow: var(--shadow-card); }
+@utility field {
+  width: 100%; height: 3.25rem; padding: 0 1rem; border-radius: 0.875rem;
+  background: var(--muted); font-size: 1.0625rem; outline: none;
+  &:focus { box-shadow: 0 0 0 2px var(--ring); background: var(--card); }
+}
+@utility btn-base {
+  display: inline-flex; align-items: center; justify-content: center; border-radius: 1rem;
+  font-weight: 700; transition: transform .1s, opacity .2s;
+  &:active { transform: scale(0.97); }
+  &:disabled { opacity: .4; }
+}
+@utility btn-primary { @apply btn-base; background: var(--primary); color: var(--primary-foreground); box-shadow: 0 8px 20px -10px var(--primary); }
+@utility btn-soft { @apply btn-base; background: var(--secondary); color: var(--secondary-foreground); }
+@utility btn-ghost { @apply btn-base; color: var(--secondary-foreground); font-weight: 600; &:active { background: var(--muted); } }

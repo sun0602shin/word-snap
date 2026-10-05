@@ -1,24 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { WordKok } from "@/components/WordKok";
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
 export const Route = createFileRoute("/")({
-  component: Index,
+  head: () => ({
+    meta: [
+      { title: "단어콕 — 사진 찍고 바로 영단어 퀴즈" },
+      { name: "description", content: "단어장 사진을 찍으면 영단어와 뜻을 읽어 바로 받아쓰기 퀴즈를 만들어 주는 앱" },
+      { property: "og:title", content: "단어콕 — 사진 찍고 바로 영단어 퀴즈" },
+      { property: "og:description", content: "단어장 사진으로 만드는 초등학생용 영단어 퀴즈" },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary" },
+    ],
+  }),
+  component: WordKok,
 });
-
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
-function Index() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
