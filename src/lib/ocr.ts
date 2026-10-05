@@ -193,7 +193,7 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
     const enConf = Math.min(...p.en.map((t) => t.conf));
     const koConf = koToks.length ? koToks.reduce((s, t) => s + t.conf, 0) / koToks.length : 0;
     out.push({ id: uid(), en, ko, uncertain: !hasKo || latinNoise || enConf < 70 || koConf < 60, x: p.en[0]!.x0, y: p.y,
-      box: { x0: p.en[p.en.length - 1]!.x1 + mh * 0.3, x1: p.xEnd! - mh * 0.3, y0: p.y0! - mh * 0.35, y1: p.y1! + mh * 0.35 } });
+      box: { x0: p.en[p.en.length - 1]!.x1 + mh * 0.3, x1: p.xEnd! - mh * 0.3, y0: p.y0! - mh * 0.7, y1: p.y1! + mh * 0.7 } });
   }
   // order by column (section) then row: cluster English start x positions
   const xs = [...new Set(out.map((w) => w.x))].sort((a, b) => a - b);
