@@ -29,7 +29,7 @@ export function getWorker(): Promise<TWorker> {
           stageCb?.({ label: STAGE_KO[m.status] ?? "처리 중", progress: m.progress ?? 0 }),
       });
       await w.setParameters({
-        tessedit_pageseg_mode: T.PSM.SPARSE_TEXT,
+        tessedit_pageseg_mode: (globalThis as { __psm?: string }).__psm as never ?? T.PSM.SPARSE_TEXT,
         preserve_interword_spaces: "1",
         user_defined_dpi: "300",
       });
@@ -137,6 +137,7 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
   }
 
   type Pair = { en: Tok[]; ko: Tok[]; y: number };
+  const pageW = Math.max(...toks.map((t) => t.x1));
   const pairs: Pair[] = [];
   let prevRowPairs: Pair[] = [];
   for (const row of rows) {
@@ -166,12 +167,21 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
     if (rowPairs.length) { pairs.push(...rowPairs); prevRowPairs = rowPairs; }
   }
 
-  const out: Word[] = [];
+  const out: (Word & { x: number; y: number })[] = [];
   for (const p of pairs) {
     const en = p.en.map((t) => t.t.replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "")).join(" ").toLowerCase();
     const koToks = p.ko.filter((t) => !(t.kind === "punct" && /^[.:;]$/.test(t.t)));
     while (koToks.length && koToks[koToks.length - 1]!.kind === "punct" && !/[)]/.test(koToks[koToks.length - 1]!.t)) koToks.pop();
-    let ko = koToks.map((t) => t.t).join(" ");
+    // Korean OCR often splits syllables: join tightly spaced tokens without a space
+    let latinNoise = false;
+    let ko = "";
+    let prev: Tok | null = null;
+    for (const t of koToks) {
+      if (t.kind === "en") { latinNoise = true; continue; }
+      if (prev) ko += t.x0 - prev.x1 < mh * 0.32 ? "" : " ";
+      ko += t.t;
+      prev = t;
+    }
     ko = ko.replace(/\s+([,)])/g, "$1").replace(/\(\s+/g, "(").replace(/\s*\/\s*/g, " / ").replace(/,(?=\S)/g, ", ").replace(/\s+/g, " ").trim();
     const hasKo = HANGUL.test(ko);
     // Header/title without meaning near the top → noise
@@ -179,11 +189,19 @@ export function pairTokens(words: { text: string; confidence: number; bbox: { x0
     if (!hasKo && en.length < 3) continue;
     const enConf = Math.min(...p.en.map((t) => t.conf));
     const koConf = koToks.length ? koToks.reduce((s, t) => s + t.conf, 0) / koToks.length : 0;
-    out.push({ id: uid(), en, ko, uncertain: !hasKo || enConf < 70 || koConf < 60 });
+    out.push({ id: uid(), en, ko, uncertain: !hasKo || latinNoise || enConf < 70 || koConf < 60, x: p.en[0]!.x0, y: p.y } as Word & { x: number; y: number });
   }
+  // order by column (section) then row: cluster English start x positions
+  const xs = [...new Set(out.map((w) => w.x))].sort((a, b) => a - b);
+  const starts: number[] = [];
+  for (const x of xs) if (!starts.length || x - starts[starts.length - 1]! > pageW * 0.15) starts.push(x);
+  const col = (x: number) => starts.filter((s0) => x >= s0 - pageW * 0.05).length;
+  out.sort((a, b) => col(a.x) - col(b.x) || a.y - b.y);
   // de-duplicate identical English words (e.g. repeated reads)
   const seen = new Set<string>();
-  return out.filter((w) => (seen.has(w.en + "|" + w.ko) ? false : (seen.add(w.en + "|" + w.ko), true)));
+  return out
+    .filter((w) => (seen.has(w.en + "|" + w.ko) ? false : (seen.add(w.en + "|" + w.ko), true)))
+    .map(({ id, en, ko, uncertain }) => ({ id, en, ko, uncertain }));
 }
 
 export async function recognizeVocab(file: Blob, rotation: number, onStage: (s: OcrStage) => void): Promise<Word[]> {
