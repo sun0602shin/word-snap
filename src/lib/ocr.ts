@@ -1,77 +1,122 @@
-// Browser-only OCR pipeline tuned for "English word | Korean meaning" vocabulary tables.
-// Uses tesseract.js (eng+kor) with word-level bounding boxes, then pairs words by row/column geometry.
+// Browser-only OCR pipeline for printed vocabulary tables: "English word | Korean meaning" rows
+// arranged in one or more sections (e.g. 4 sections x 10 rows).
+//
+// 1. Preprocess the photo once (EXIF-aware load, size cap, grayscale + contrast stretch).
+// 2. Layout pass: sparse English OCR on a downscaled page → left-aligned English anchors →
+//    columns → sections → evenly pitched rows (missing rows interpolated).
+// 3. Row pass: each row is cut into an English cell and a Korean cell, upscaled 2–3x and read
+//    with a dedicated eng / kor worker (single-line mode) on several preprocessing variants;
+//    the highest-confidence valid reading wins.
+// 4. Second pass on empty / low-confidence rows when fewer words than expected were found.
 import { uid, type Word } from "./wordkok";
 
 export type OcrStage = { label: string; progress: number };
-type TWorker = import("tesseract.js").Worker;
+export type OcrResult = { words: Word[]; expected: number; recognized: number; low: number };
+type Lang = "eng" | "kor";
+type TW = import("tesseract.js").Worker;
+type Box = { x0: number; y0: number; x1: number; y1: number };
+type RawWord = { text: string; confidence: number; bbox: Box };
 
-let workerPromise: Promise<TWorker> | null = null;
+/* ---------------- workers (reused, lazily created, recreated after failure) ---------------- */
+const workers: Partial<Record<Lang, Promise<TW>>> = {};
+const modes = new WeakMap<TW, string>();
 let stageCb: ((s: OcrStage) => void) | null = null;
+let phase: "load" | "layout" | "rows" = "load";
 
-const STAGE_KO: Record<string, string> = {
+const LOAD_LABEL: Record<string, string> = {
   "loading tesseract core": "인식 엔진 불러오는 중",
   "initializing tesseract": "인식 엔진 준비 중",
-  "initialized tesseract": "인식 엔진 준비 완료",
-  "loading language traineddata": "영어·한국어 데이터 내려받는 중",
-  "loaded language traineddata": "언어 데이터 준비 완료",
+  "loading language traineddata": "데이터 내려받는 중",
   "initializing api": "인식 준비 중",
-  "initialized api": "인식 준비 완료",
-  "recognizing text": "글자 읽는 중",
 };
 
-/** Single reusable worker; recreated after a failure. */
-export function getWorker(): Promise<TWorker> {
-  if (!workerPromise) {
-    workerPromise = (async () => {
-      const T = await import("tesseract.js");
-      const w = await T.createWorker(["eng", "kor"], T.OEM.LSTM_ONLY, {
-        logger: (m: { status: string; progress: number }) =>
-          stageCb?.({ label: STAGE_KO[m.status] ?? "처리 중", progress: m.progress ?? 0 }),
-      });
-      await w.setParameters({
-        tessedit_pageseg_mode: T.PSM.SPARSE_TEXT,
-        preserve_interword_spaces: "1",
-        user_defined_dpi: "300",
-      });
-      return w;
-    })().catch((e) => {
-      workerPromise = null;
-      throw e;
-    });
+function withTimeout<T>(p: Promise<T>, ms: number, msg: string): Promise<T> {
+  return new Promise((res, rej) => {
+    const t = setTimeout(() => rej(new Error(msg)), ms);
+    p.then((v) => { clearTimeout(t); res(v); }, (e) => { clearTimeout(t); rej(e); });
+  });
+}
+
+export function getWorker(lang: Lang): Promise<TW> {
+  if (!workers[lang]) {
+    const name = lang === "eng" ? "영어" : "한국어";
+    const p = withTimeout(
+      (async () => {
+        const T = await import("tesseract.js");
+        const w = await T.createWorker(lang, T.OEM.LSTM_ONLY, {
+          logger: (m: { status: string; progress: number }) => {
+            if (m.status === "recognizing text") {
+              if (phase === "layout") stageCb?.({ label: "구역과 줄 찾는 중", progress: 0.06 + 0.12 * (m.progress || 0) });
+              return;
+            }
+            const l = LOAD_LABEL[m.status];
+            if (l) stageCb?.({ label: `${name} ${l}`, progress: 0.02 + 0.04 * (m.progress || 0) });
+          },
+        });
+        await w.setParameters({ preserve_interword_spaces: "1", user_defined_dpi: "300" });
+        return w;
+      })(),
+      120_000,
+      "LOAD_TIMEOUT",
+    );
+    workers[lang] = p.catch((e) => { delete workers[lang]; throw e; });
   }
-  return workerPromise;
+  return workers[lang]!;
 }
 
-export async function resetWorker() {
-  const p = workerPromise;
-  workerPromise = null;
-  if (p) (await p.catch(() => null))?.terminate();
+/** Load English first, then Korean, to avoid a double memory spike on iPhone. */
+export function warmUp() {
+  getWorker("eng").then(() => getWorker("kor")).catch(() => {});
 }
 
-/** Load with EXIF orientation honored (img element does this on iOS Safari). */
+export async function resetWorkers() {
+  for (const lang of ["eng", "kor"] as Lang[]) {
+    const p = workers[lang];
+    delete workers[lang];
+    if (p) (await p.catch(() => null))?.terminate();
+  }
+}
+
+async function setMode(w: TW, mode: "sparse" | "enLine" | "koLine") {
+  if (modes.get(w) === mode) return;
+  const T = await import("tesseract.js");
+  if (mode === "sparse") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SPARSE_TEXT, tessedit_char_whitelist: "", tessedit_char_blacklist: "" });
+  if (mode === "enLine") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE, tessedit_char_whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-' ", tessedit_char_blacklist: "" });
+  if (mode === "koLine") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE, tessedit_char_whitelist: "", tessedit_char_blacklist: "0123456789|_@#$%^&*=+<>{}[]" });
+  modes.set(w, mode);
+}
+
+/* ---------------- image helpers ---------------- */
+const newCanvas = (w: number, h: number) => {
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w));
+  c.height = Math.max(1, Math.round(h));
+  return c;
+};
+const ctx2d = (c: HTMLCanvasElement) => c.getContext("2d", { willReadFrequently: true })!;
+const free = (c: HTMLCanvasElement) => { c.width = 0; c.height = 0; };
+const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
+const median = (a: number[]) => { if (!a.length) return 0; const s = [...a].sort((x, y) => x - y); return s[Math.floor(s.length / 2)]!; };
+
 function loadImage(file: Blob): Promise<HTMLImageElement> {
   return new Promise((res, rej) => {
     const url = URL.createObjectURL(file);
     const img = new Image();
     img.onload = () => { res(img); setTimeout(() => URL.revokeObjectURL(url), 1000); };
-    img.onerror = () => rej(new Error("이미지를 열 수 없어요"));
-    img.src = url;
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error("IMAGE")); };
+    img.src = url; // <img> honours EXIF orientation on iOS Safari
   });
 }
 
-/** Resize to OCR-friendly resolution, rotate, grayscale, percentile contrast stretch. */
-export async function preprocess(file: Blob, rotation = 0): Promise<HTMLCanvasElement> {
+/** Grayscale + percentile contrast stretch, long side capped (iOS canvas memory). */
+export async function preprocess(file: Blob, rotation = 0, maxSide = 2400): Promise<HTMLCanvasElement> {
   const img = await loadImage(file);
   const w0 = img.naturalWidth, h0 = img.naturalHeight;
-  // Target long side ~2800px; iOS canvas limit ~16.7M px.
-  let scale = 2800 / Math.max(w0, h0);
-  if (w0 * h0 * scale * scale > 14_000_000) scale = Math.sqrt(14_000_000 / (w0 * h0));
+  const scale = Math.min(maxSide / Math.max(w0, h0), 2);
   const w = Math.round(w0 * scale), h = Math.round(h0 * scale);
   const rot = ((rotation % 360) + 360) % 360;
-  const c = document.createElement("canvas");
-  c.width = rot % 180 ? h : w;
-  c.height = rot % 180 ? w : h;
-  const ctx = c.getContext("2d", { willReadFrequently: true })!;
+  const c = newCanvas(rot % 180 ? h : w, rot % 180 ? w : h);
+  const ctx = ctx2d(c);
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, c.width, c.height);
   ctx.translate(c.width / 2, c.height / 2);
@@ -79,190 +124,351 @@ export async function preprocess(file: Blob, rotation = 0): Promise<HTMLCanvasEl
   ctx.imageSmoothingQuality = "high";
   ctx.drawImage(img, -w / 2, -h / 2, w, h);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
-
   const d = ctx.getImageData(0, 0, c.width, c.height);
   const px = d.data;
   const hist = new Uint32Array(256);
-  const gray = new Uint8ClampedArray(px.length / 4);
-  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
+  for (let i = 0; i < px.length; i += 4) {
     const g = (px[i]! * 0.299 + px[i + 1]! * 0.587 + px[i + 2]! * 0.114) | 0;
-    gray[j] = g;
+    px[i] = g;
     hist[g]!++;
   }
-  const n = gray.length;
+  const n = px.length / 4;
   let lo = 0, hi = 255, acc = 0;
   for (let v = 0; v < 256; v++) { acc += hist[v]!; if (acc > n * 0.01) { lo = v; break; } }
   acc = 0;
-  for (let v = 255; v >= 0; v--) { acc += hist[v]!; if (acc > n * 0.08) { hi = v; break; } }
-  const range = Math.max(30, hi - lo);
-  for (let i = 0, j = 0; i < px.length; i += 4, j++) {
-    let v = ((gray[j]! - lo) / range) * 255;
-    v = v > 235 ? 255 : v; // flatten paper shading
+  for (let v = 255; v >= 0; v--) { acc += hist[v]!; if (acc > n * 0.1) { hi = v; break; } }
+  const range = Math.max(40, hi - lo);
+  for (let i = 0; i < px.length; i += 4) {
+    let v = ((px[i]! - lo) / range) * 255;
+    if (v > 230) v = 255;
     px[i] = px[i + 1] = px[i + 2] = v;
   }
   ctx.putImageData(d, 0, 0);
   return c;
 }
 
-/* ---------- table pairing ---------- */
-export type Cand = Word & { box: { x0: number; y0: number; x1: number; y1: number } };
-type Tok = { t: string; conf: number; x0: number; x1: number; y0: number; y1: number; kind: "en" | "ko" | "punct" | "noise" };
-const HANGUL = /[가-힣]/;
-const EN_RE = /^[A-Za-z][A-Za-z'-]*$/;
-
-function classify(raw: string, conf: number): Tok["kind"] {
-  if (HANGUL.test(raw)) return "ko";
-  const s = raw.replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
-  if (s && EN_RE.test(s) && s.length >= 2 && conf >= 25) return "en";
-  if (/^[/,()~·.:;\-[\]]+$/.test(raw)) return "punct";
-  return "noise";
+function scaled(src: HTMLCanvasElement, f: number) {
+  const c = newCanvas(src.width * f, src.height * f);
+  const x = ctx2d(c);
+  x.imageSmoothingQuality = "high";
+  x.drawImage(src, 0, 0, c.width, c.height);
+  return c;
 }
 
-export function pairTokens(words: { text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }[], pageH: number): Cand[] {
-  const toks: Tok[] = words
-    .map((w) => ({ t: w.text.trim(), conf: w.confidence, ...w.bbox, kind: classify(w.text.trim(), w.confidence) }))
-    .filter((t) => t.t && t.kind !== "noise" && !/^day$/i.test(t.t.replace(/[^A-Za-z]/g, "")) && !/^qr$/i.test(t.t));
-  if (!toks.length) return [];
-  const heights = toks.map((t) => t.y1 - t.y0).sort((a, b) => a - b);
-  const mh = heights[Math.floor(heights.length / 2)] || 20;
-
-  // group into rows by vertical center
-  toks.sort((a, b) => (a.y0 + a.y1) / 2 - (b.y0 + b.y1) / 2);
-  const rows: Tok[][] = [];
-  let cy = -1e9;
-  for (const t of toks) {
-    const yc = (t.y0 + t.y1) / 2;
-    const last = rows[rows.length - 1];
-    if (last && Math.abs(yc - cy) < mh * 0.6) { last.push(t); cy = (cy * (last.length - 1) + yc) / last.length; }
-    else { rows.push([t]); cy = yc; }
-  }
-
-  type Pair = { en: Tok[]; ko: Tok[]; y: number; y0?: number; y1?: number; xEnd?: number };
-  const pageW = Math.max(...toks.map((t) => t.x1));
-  const pairs: Pair[] = [];
-  let prevRowPairs: Pair[] = [];
-  for (const row of rows) {
-    row.sort((a, b) => a.x0 - b.x0);
-    const rowPairs: Pair[] = [];
-    let cur: Pair | null = null;
-    const orphanKo: Tok[] = [];
-    for (let i = 0; i < row.length; i++) {
-      const t = row[i]!;
-      if (t.kind === "en") {
-        const prev = row[i - 1];
-        const continuesEn = cur && cur.ko.length === 0 && prev?.kind === "en" && t.x0 - prev.x1 < mh * 1.2 && cur.en.length < 4;
-        const insideKo = cur && cur.ko.length > 0 && prev && t.x0 - prev.x1 < mh * 0.8 && row[i + 1]?.kind === "ko" && t.x0 - prev.x1 < mh * 0.4;
-        if (continuesEn) cur!.en.push(t);
-        else if (insideKo) cur!.ko.push(t);
-        else { cur = { en: [t], ko: [], y: t.y0 }; rowPairs.push(cur); }
-      } else if (cur) cur.ko.push(t);
-      else if (t.kind === "ko") orphanKo.push(t);
-    }
-    // Korean-only text: wrapped continuation of a meaning in the previous row (same column)
-    const leftovers = rowPairs.length ? [] : orphanKo;
-    if (leftovers.length && prevRowPairs.length) {
-      const x = leftovers[0]!.x0;
-      const target = prevRowPairs.find((p) => p.ko.length && Math.abs((p.ko[0]?.x0 ?? 0) - x) < mh * 6);
-      if (target) target.ko.push(...leftovers);
-    }
-    const ry0 = Math.min(...row.map((t) => t.y0)), ry1 = Math.max(...row.map((t) => t.y1));
-    rowPairs.forEach((rp, k) => { rp.y0 = ry0; rp.y1 = ry1; rp.xEnd = rowPairs[k + 1]?.en[0]!.x0 ?? pageW; });
-    if (rowPairs.length) { pairs.push(...rowPairs); prevRowPairs = rowPairs; }
-  }
-
-  const out: (Cand & { x: number; y: number })[] = [];
-  for (const p of pairs) {
-    const en = p.en.map((t) => t.t.replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "")).join(" ").toLowerCase();
-    const koToks = p.ko.filter((t) => !(t.kind === "punct" && /^[.:;]$/.test(t.t)));
-    while (koToks.length && koToks[koToks.length - 1]!.kind === "punct" && !/[)]/.test(koToks[koToks.length - 1]!.t)) koToks.pop();
-    // Korean OCR often splits syllables: join tightly spaced tokens without a space
-    let latinNoise = false;
-    let ko = "";
-    let prev: Tok | null = null;
-    for (const t of koToks) {
-      if (t.kind === "en") { latinNoise = true; continue; }
-      if (prev) ko += t.x0 - prev.x1 < mh * 0.32 ? "" : " ";
-      ko += t.t;
-      prev = t;
-    }
-    ko = ko.replace(/\s+([,)])/g, "$1").replace(/\(\s+/g, "(").replace(/\s*\/\s*/g, " / ").replace(/,(?=\S)/g, ", ").replace(/\s+/g, " ").trim();
-    const hasKo = HANGUL.test(ko);
-    // Header/title without meaning near the top → noise
-    if (!hasKo && p.y < pageH * 0.12) continue;
-    if (!hasKo && en.length < 3) continue;
-    const enConf = Math.min(...p.en.map((t) => t.conf));
-    const koConf = koToks.length ? koToks.reduce((s, t) => s + t.conf, 0) / koToks.length : 0;
-    out.push({ id: uid(), en, ko, uncertain: !hasKo || latinNoise || enConf < 70 || koConf < 60, x: p.en[0]!.x0, y: p.y,
-      box: { x0: p.en[p.en.length - 1]!.x1 + mh * 0.3, x1: p.xEnd! - mh * 0.3, y0: p.y0! - mh * 0.7, y1: p.y1! + mh * 0.7 } });
-  }
-  // order by column (section) then row: cluster English start x positions
-  const xs = [...new Set(out.map((w) => w.x))].sort((a, b) => a - b);
-  const starts: number[] = [];
-  for (const x of xs) if (!starts.length || x - starts[starts.length - 1]! > pageW * 0.15) starts.push(x);
-  const col = (x: number) => starts.filter((s0) => x >= s0 - pageW * 0.05).length;
-  out.sort((a, b) => col(a.x) - col(b.x) || a.y - b.y);
-  // de-duplicate identical English words (e.g. repeated reads)
-  const seen = new Set<string>();
-  return out
-    .filter((w) => (seen.has(w.en + "|" + w.ko) ? false : (seen.add(w.en + "|" + w.ko), true)))
-    .map(({ id, en, ko, uncertain, box }) => ({ id, en, ko, uncertain: !!uncertain, box }));
+function cropScaled(src: HTMLCanvasElement, b: Box, scale: number, pad = 14) {
+  const x0 = clamp(Math.round(b.x0), 0, src.width - 1), y0 = clamp(Math.round(b.y0), 0, src.height - 1);
+  const w = clamp(Math.round(b.x1), x0 + 1, src.width) - x0, h = clamp(Math.round(b.y1), y0 + 1, src.height) - y0;
+  const c = newCanvas(w * scale + pad * 2, h * scale + pad * 2);
+  const x = ctx2d(c);
+  x.fillStyle = "#fff";
+  x.fillRect(0, 0, c.width, c.height);
+  x.imageSmoothingQuality = "high";
+  x.drawImage(src, x0, y0, w, h, pad, pad, w * scale, h * scale);
+  return c;
 }
 
-/** Keep Korean, commas, slashes, parentheses, tildes; drop row numbers / stray latin. */
+/** Sharpen (3x3) + Otsu binarisation. */
+function thresholdVariant(src: HTMLCanvasElement) {
+  const w = src.width, h = src.height;
+  const c = newCanvas(w, h);
+  const x = ctx2d(c);
+  x.drawImage(src, 0, 0);
+  const d = x.getImageData(0, 0, w, h);
+  const p = d.data;
+  const g = new Uint8ClampedArray(w * h);
+  for (let i = 0; i < g.length; i++) g[i] = p[i * 4]!;
+  const s = new Uint8ClampedArray(g);
+  for (let yy = 1; yy < h - 1; yy++)
+    for (let xx = 1; xx < w - 1; xx++) {
+      const i = yy * w + xx;
+      s[i] = 5 * g[i]! - g[i - 1]! - g[i + 1]! - g[i - w]! - g[i + w]!;
+    }
+  const hist = new Array(256).fill(0) as number[];
+  for (const v of s) hist[v]!++;
+  let sum = 0;
+  for (let t = 0; t < 256; t++) sum += t * hist[t]!;
+  let sumB = 0, wB = 0, best = 0, th = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]!;
+    if (!wB) continue;
+    const wF = s.length - wB;
+    if (!wF) break;
+    sumB += t * hist[t]!;
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const between = wB * wF * (mB - mF) ** 2;
+    if (between > best) { best = between; th = t; }
+  }
+  for (let i = 0; i < s.length; i++) { const v = s[i]! > th ? 255 : 0; p[i * 4] = p[i * 4 + 1] = p[i * 4 + 2] = v; }
+  x.putImageData(d, 0, 0);
+  return c;
+}
+
+function inkRatio(src: HTMLCanvasElement, b: Box) {
+  const x0 = clamp(Math.round(b.x0), 0, src.width - 1), y0 = clamp(Math.round(b.y0), 0, src.height - 1);
+  const w = clamp(Math.round(b.x1), x0 + 1, src.width) - x0, h = clamp(Math.round(b.y1), y0 + 1, src.height) - y0;
+  const p = ctx2d(src).getImageData(x0, y0, w, h).data;
+  let dark = 0, tot = 0;
+  for (let i = 0; i < p.length; i += 8) { tot++; if (p[i]! < 110) dark++; }
+  return tot ? dark / tot : 0;
+}
+
+function thumb(src: HTMLCanvasElement, b: Box) {
+  const w = b.x1 - b.x0;
+  const c = cropScaled(src, b, Math.min(1, 560 / Math.max(1, w)), 4);
+  const url = c.toDataURL("image/jpeg", 0.6);
+  free(c);
+  return url;
+}
+
+/* ---------------- text cleaning ---------------- */
+const HANGUL = /[가-힣]/g;
+const hangulCount = (s: string) => (s.match(HANGUL) ?? []).length;
+const EN_VALID = /^[a-z][a-z' -]*[a-z]$/;
+
+/** Letters/hyphen/apostrophe only; fixes common l/I confusion only when confidence is not high. */
+export function cleanEnglish(raw: string, conf = 0): string {
+  let s = raw.replace(/[\n|]/g, " ").replace(/[^A-Za-z' -]/g, " ");
+  s = s.replace(/([a-z])I(?=[a-z])/g, "$1l"); // "utiIize" → "utilize" (capital I inside lowercase word)
+  if (conf < 90) s = s.replace(/(^|\s)I(?=[a-z]{2,})/g, "$1l"); // "Iift" → "lift"
+  let toks = s.split(/\s+/).filter(Boolean);
+  while (toks.length > 1 && toks[0]!.replace(/[^A-Za-z]/g, "").length <= 1) toks.shift(); // check marks, row bullets
+  while (toks.length > 1 && toks[toks.length - 1]!.replace(/[^A-Za-z]/g, "").length <= 1) toks.pop();
+  toks = toks.slice(0, 4);
+  return toks.join(" ").toLowerCase().replace(/^[-' ]+|[-' ]+$/g, "");
+}
+
+/** Keep Korean, commas, slashes, parentheses, tildes; drop row numbers / stray latin / jamo. */
 export function cleanMeaning(raw: string): string {
-  let s = raw.replace(/\n/g, " ").replace(/[|_\[\]{}<>]/g, " ");
+  let s = raw.replace(/\n/g, " ").replace(/[|_[\]{}<>]/g, " ");
   s = s.replace(/(^|\s)[A-Za-z0-9]+(?=\s|$)/g, " ").replace(/\d+/g, " ");
-  s = s.replace(/\s+([,)])/g, "$1").replace(/\(\s+/g, "(").replace(/\s*\/\s*/g, " / ").replace(/,(?=\S)/g, ", ");
   s = s.replace(/(^|\s)[ㄱ-ㅣ]+(?=\s|$)/g, " ").replace(/\(\s*\)/g, " ");
-  return s.replace(/\s+/g, " ").replace(/^[\s,./:;-]+|[\s,/:;-]+$/g, "").trim();
+  s = s.replace(/\s+([,)])/g, "$1").replace(/\(\s+/g, "(").replace(/\s*\/\s*/g, " / ").replace(/,(?=\S)/g, ", ");
+  return s.replace(/\s+/g, " ").replace(/^[\s,./:;-]+|[\s,/:;.-]+$/g, "").trim();
 }
 
-export async function recognizeVocab(file: Blob, rotation: number, onStage: (s: OcrStage) => void): Promise<Word[]> {
-  stageCb = onStage;
-  try {
-    onStage({ label: "사진 다듬는 중", progress: 0 });
-    const canvas = await preprocess(file, rotation);
-    onStage({ label: "인식 엔진 준비 중", progress: 0 });
-    const worker = await getWorker();
-    onStage({ label: "글자 읽는 중", progress: 0 });
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data } = (await worker.recognize(canvas, { rotateAuto: true }, { blocks: true })) as any;
-    const words: Parameters<typeof pairTokens>[0] = [];
-    for (const b of data.blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) for (const w of l.words ?? []) words.push(w);
-    onStage({ label: "단어 정리 중", progress: 1 });
-    const cands = pairTokens(words, canvas.height);
-    // Pass 2: re-read each meaning cell as a single text line (much better for Korean)
-    const T = await import("tesseract.js");
-    await worker.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE });
-    try {
-      for (let i = 0; i < cands.length; i++) {
-        onStage({ label: `뜻 다시 읽는 중 (${i + 1}/${cands.length})`, progress: (i + 1) / cands.length });
-        const c = cands[i]!;
-        const b = c.box;
-        const x0 = Math.max(0, Math.round(b.x0)), y0 = Math.max(0, Math.round(b.y0));
-        const w = Math.min(canvas.width, Math.round(b.x1)) - x0, h = Math.min(canvas.height, Math.round(b.y1)) - y0;
-        if (w < 10 || h < 8) continue;
-        const crop = document.createElement("canvas");
-        crop.width = w + 40; crop.height = h + 40;
-        const cx = crop.getContext("2d")!;
-        cx.fillStyle = "#fff"; cx.fillRect(0, 0, crop.width, crop.height);
-        cx.drawImage(canvas, x0, y0, w, h, 20, 20, w, h);
-        const r = await worker.recognize(crop);
-        const line = cleanMeaning(r.data.text);
-        const hc = (s: string) => (s.match(/[가-힣]/g) ?? []).length;
-        if (hc(line) >= Math.max(1, hc(c.ko) * 0.7) && r.data.confidence >= 45) {
-          c.ko = line;
-          c.uncertain = r.data.confidence < 70;
-        }
-      }
-    } finally {
-      await worker.setParameters({ tessedit_pageseg_mode: T.PSM.SPARSE_TEXT });
+/* ---------------- layout detection ---------------- */
+type Row = { yc: number; half: number; enX0: number; split: number; right: number; anchorX1?: number };
+
+function detectRows(words: RawWord[], f: number, base: HTMLCanvasElement, expected: number): { rows: Row[]; mh: number } {
+  const toks = words.map((w) => ({ t: w.text.trim(), conf: w.confidence, x0: w.bbox.x0 * f, x1: w.bbox.x1 * f, y0: w.bbox.y0 * f, y1: w.bbox.y1 * f }));
+  const anchors = toks.filter((t) => {
+    const s = t.t.replace(/^[^A-Za-z]+|[^A-Za-z]+$/g, "");
+    return s.length >= 2 && /^[A-Za-z][A-Za-z'-]*$/.test(s) && /[aeiouyAEIOUY]/.test(s) && t.conf >= 60 && !/^(day|qr|word|words)$/i.test(s);
+  });
+  if (anchors.length < 3) return { rows: [], mh: 0 };
+  const mh = median(anchors.map((a) => a.y1 - a.y0)) || 20;
+
+  // cluster left edges → columns
+  anchors.sort((a, b) => a.x0 - b.x0);
+  type Col = { x: number; items: typeof anchors };
+  const cols: Col[] = [];
+  for (const a of anchors) {
+    const c = cols[cols.length - 1];
+    if (c && a.x0 - c.x < mh * 1.3) { c.items.push(a); c.x = median(c.items.map((i) => i.x0)); }
+    else cols.push({ x: a.x0, items: [a] });
+  }
+  const maxN = Math.max(...cols.map((c) => c.items.length));
+  const good = cols.filter((c) => {
+    if (c.items.length < Math.max(3, maxN * 0.3)) return false;
+    // one anchor per line: the leftmost token of the English cell
+    const meanConf = c.items.reduce((s, i) => s + i.conf, 0) / c.items.length;
+    return meanConf >= 72;
+  });
+
+  type Sec = { colX: number; ys: { y: number; x1: number }[]; pitch: number };
+  const secs: Sec[] = [];
+  for (const c of good) {
+    const items = [...c.items].sort((a, b) => a.y0 - b.y0);
+    const ys: { y: number; x1: number; conf: number }[] = [];
+    for (const it of items) {
+      const yc = (it.y0 + it.y1) / 2;
+      const last = ys[ys.length - 1];
+      if (last && yc - last.y < mh * 0.6) { if (it.conf > last.conf) Object.assign(last, { y: yc, x1: it.x1, conf: it.conf }); }
+      else ys.push({ y: yc, x1: it.x1, conf: it.conf });
     }
-    return cands.map(({ id, en, ko, uncertain }) => ({ id, en, ko, uncertain: !!uncertain }));
+    const diffs = ys.slice(1).map((v, i) => v.y - ys[i]!.y);
+    const m0 = median(diffs) || mh * 2.5;
+    const pitch = median(diffs.filter((d) => d < m0 * 1.6)) || m0;
+    let block: { y: number; x1: number }[] = [];
+    const flush = () => { if (block.length >= 2) secs.push({ colX: c.x, ys: block, pitch }); block = []; };
+    for (const v of ys) {
+      const last = block[block.length - 1];
+      if (last && v.y - last.y > pitch * 3.5) flush();
+      block.push(v);
+    }
+    flush();
+  }
+  if (!secs.length) return { rows: [], mh };
+
+  const perSec = Math.max(1, Math.round(expected / secs.length));
+  const rows: Row[] = [];
+  for (const s of secs) {
+    const top = s.ys[0]!.y, bottom = s.ys[s.ys.length - 1]!.y;
+    // right edge: next section column to the right whose rows overlap vertically
+    const right = Math.min(base.width - 2, ...secs.filter((o) => o.colX > s.colX + mh * 3 && o.ys[0]!.y < bottom + s.pitch && o.ys[o.ys.length - 1]!.y > top - s.pitch).map((o) => o.colX - mh * 0.6));
+    // split between English and Korean cells: first non-anchor token to the right on the same line
+    const starts: number[] = [];
+    for (const r of s.ys) {
+      const nxt = toks.filter((t) => Math.abs((t.y0 + t.y1) / 2 - r.y) < mh * 0.5 && t.x0 > r.x1 + mh * 0.4 && t.x0 < right).sort((a, b) => a.x0 - b.x0)[0];
+      if (nxt) starts.push(nxt.x0);
+    }
+    const x1s = s.ys.map((r) => r.x1).sort((a, b) => a - b);
+    const p80 = x1s[Math.floor(x1s.length * 0.8)] ?? x1s[x1s.length - 1]!;
+    let split = starts.length ? median(starts) - mh * 0.35 : p80 + mh;
+    split = clamp(split, p80 + mh * 0.2, right - mh * 2);
+    const half = clamp(s.pitch * 0.5, mh * 0.8, mh * 1.6);
+
+    // fill gaps (missed rows) using the regular row pitch
+    const ys: { y: number; x1?: number }[] = [];
+    s.ys.forEach((r, i) => {
+      if (i > 0) {
+        const prev = s.ys[i - 1]!;
+        const k = Math.round((r.y - prev.y) / s.pitch);
+        for (let j = 1; j < k; j++) ys.push({ y: prev.y + ((r.y - prev.y) * j) / k });
+      }
+      ys.push(r);
+    });
+    // extend up/down towards the expected rows per section while there is ink on that line
+    const hasInk = (y: number) => y - half > 0 && y + half < base.height && inkRatio(base, { x0: s.colX, y0: y - half * 0.6, x1: right, y1: y + half * 0.6 }) > 0.01;
+    let guard = 0;
+    while (ys.length < perSec && guard++ < perSec) {
+      const down = ys[ys.length - 1]!.y + s.pitch, up = ys[0]!.y - s.pitch;
+      if (hasInk(down)) ys.push({ y: down });
+      else if (hasInk(up)) ys.unshift({ y: up });
+      else break;
+    }
+    for (const r of ys) {
+      const row: Row = { yc: r.y, half, enX0: s.colX - mh * 0.4, split, right };
+      if (r.x1 !== undefined) row.anchorX1 = r.x1;
+      rows.push(row);
+    }
+  }
+  return { rows, mh };
+}
+
+/* ---------------- row reading ---------------- */
+type Read = { text: string; conf: number; score: number };
+const EMPTY: Read = { text: "", conf: 0, score: -1 };
+
+async function readCell(w: TW, base: HTMLCanvasElement, b: Box, scale: number, variant: "c" | "t", lang: Lang): Promise<Read> {
+  const c0 = cropScaled(base, b, scale);
+  const c = variant === "t" ? thresholdVariant(c0) : c0;
+  try {
+    const r = await w.recognize(c);
+    const conf = r.data.confidence ?? 0;
+    if (lang === "eng") {
+      const text = cleanEnglish(r.data.text ?? "", conf);
+      return { text, conf, score: EN_VALID.test(text) ? conf : conf * 0.2 };
+    }
+    const text = cleanMeaning(r.data.text ?? "");
+    const hc = hangulCount(text);
+    return { text, conf, score: hc ? conf + Math.min(10, hc) : -1 };
+  } finally {
+    if (c !== c0) free(c);
+    free(c0);
+  }
+}
+
+async function bestRead(lang: Lang, base: HTMLCanvasElement, b: Box, scale: number, good: number, prev: Read = EMPTY): Promise<Read> {
+  const w = await getWorker(lang);
+  await setMode(w, lang === "eng" ? "enLine" : "koLine");
+  let best = prev;
+  for (const v of ["c", "t"] as const) {
+    const r = await readCell(w, base, b, scale, v, lang);
+    if (r.score > best.score) best = r;
+    if (best.score >= good) break;
+  }
+  return best;
+}
+
+type RowResult = { row: Row; en: Read; ko: Read };
+const isOk = (r: RowResult) => EN_VALID.test(r.en.text) && hangulCount(r.ko.text) > 0;
+const isLow = (r: RowResult) => !isOk(r) || r.en.conf < 75 || r.ko.conf < 65;
+
+function cellBoxes(row: Row, grow = 1) {
+  const h = row.half * grow;
+  const split = Math.max(row.split, (row.anchorX1 ?? 0) + 4);
+  return {
+    en: { x0: row.enX0, y0: row.yc - h, x1: split, y1: row.yc + h },
+    ko: { x0: split, y0: row.yc - h, x1: row.right, y1: row.yc + h },
+  };
+}
+
+export async function recognizeVocab(file: Blob, rotation: number, expected: number, onStage: (s: OcrStage) => void): Promise<OcrResult> {
+  stageCb = onStage;
+  phase = "load";
+  let base: HTMLCanvasElement | null = null;
+  try {
+    onStage({ label: "사진 다듬는 중", progress: 0.01 });
+    base = await preprocess(file, rotation);
+    const eng = await getWorker("eng");
+    getWorker("kor").catch(() => {}); // start Korean download while the layout pass runs
+
+    // layout pass on a downscaled copy
+    phase = "layout";
+    onStage({ label: "구역과 줄 찾는 중", progress: 0.06 });
+    const f = Math.min(1, 1600 / Math.max(base.width, base.height));
+    const small = f < 1 ? scaled(base, f) : base;
+    await setMode(eng, "sparse");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = (await eng.recognize(small, {}, { blocks: true })) as any;
+    const raw: RawWord[] = [];
+    for (const b of data.blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) for (const w of l.words ?? []) raw.push(w);
+    if (small !== base) free(small);
+    const { rows, mh } = detectRows(raw, 1 / f, base, expected);
+    if (!rows.length) throw new Error("NO_LAYOUT");
+
+    phase = "rows";
+    onStage({ label: "한국어 엔진 준비 중", progress: 0.18 });
+    await getWorker("kor");
+    const scale = clamp(60 / mh, 2, 3);
+    const results: RowResult[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      onStage({ label: `줄 읽는 중 (${i + 1}/${rows.length})`, progress: 0.2 + 0.65 * (i / rows.length) });
+      const row = rows[i]!;
+      const bx = cellBoxes(row);
+      const [en, ko] = await Promise.all([bestRead("eng", base, bx.en, scale, 88), bestRead("kor", base, bx.ko, scale, 85)]);
+      results.push({ row, en, ko });
+    }
+
+    // second pass: empty / low-confidence rows, bigger and slightly taller crops
+    let recognized = results.filter(isOk).length;
+    if (recognized < expected) {
+      const retry = results.filter(isLow);
+      const s2 = Math.min(3.5, scale * 1.35);
+      for (let i = 0; i < retry.length; i++) {
+        onStage({ label: `어려운 줄 다시 읽는 중 (${i + 1}/${retry.length})`, progress: 0.85 + 0.13 * (i / retry.length) });
+        const r = retry[i]!;
+        const bx = cellBoxes(r.row, 1.2);
+        const [en, ko] = await Promise.all([
+          EN_VALID.test(r.en.text) && r.en.conf >= 75 ? r.en : bestRead("eng", base, bx.en, s2, 90, r.en),
+          hangulCount(r.ko.text) && r.ko.conf >= 65 ? r.ko : bestRead("kor", base, bx.ko, s2, 88, r.ko),
+        ]);
+        r.en = en;
+        r.ko = ko;
+      }
+      recognized = results.filter(isOk).length;
+    }
+
+    onStage({ label: "단어 정리 중", progress: 0.99 });
+    const words: Word[] = [];
+    const seen = new Set<string>();
+    for (const r of results) {
+      if (!r.en.text && !r.ko.text) continue;
+      const key = r.en.text + "|" + r.ko.text;
+      if (r.en.text && seen.has(key)) continue;
+      seen.add(key);
+      const b = cellBoxes(r.row);
+      words.push({ id: uid(), en: r.en.text, ko: r.ko.text, uncertain: isLow(r), crop: thumb(base, { x0: b.en.x0, y0: b.en.y0, x1: b.ko.x1, y1: b.ko.y1 }) });
+    }
+    return { words, expected, recognized, low: words.filter((w) => w.uncertain).length };
   } catch (e) {
-    await resetWorker();
+    const msg = e instanceof Error ? e.message : "";
+    if (msg !== "NO_LAYOUT" && msg !== "IMAGE") await resetWorkers();
     throw e;
   } finally {
+    if (base) free(base);
     stageCb = null;
+    phase = "load";
   }
 }

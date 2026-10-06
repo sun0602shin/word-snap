@@ -1,4 +1,4 @@
-export type Word = { id: string; en: string; ko: string; uncertain?: boolean };
+export type Word = { id: string; en: string; ko: string; uncertain?: boolean; crop?: string };
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -57,24 +57,6 @@ export function shuffle<T>(a: T[]): T[] {
 
 export const normalize = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ").replace(/[’']/g, "'");
 
-/* ---------- OCR line parsing ---------- */
-const HANGUL = /[가-힣]/;
-export function parseLine(raw: string, conf = 100): Word | null {
-  let line = raw.replace(/[|_[\]{}<>©®]/g, " ").replace(/\s+/g, " ").trim();
-  if (!line) return null;
-  if (/\bDAY\b/i.test(line) && !HANGUL.test(line.replace(/day/i, ""))) return null;
-  if (/QR/i.test(line)) return null;
-  line = line.replace(/^[\s\d.,)\-:•·□☐✓✔vV]{0,6}(?=[A-Za-z])/, "");
-  const m = line.match(/^([A-Za-z][A-Za-z'\- ]*[A-Za-z])\s*(.*)$/);
-  if (!m) return null;
-  const en = m[1]!.trim().toLowerCase();
-  if (/^day$/i.test(en) || en.length < 2) return null;
-  let ko = (m[2] ?? "").replace(/^[\s\d.,:\-]+/, "").replace(/\s*\d+\s*$/, "").trim();
-  ko = ko.replace(/\s*,\s*/g, ", ").replace(/\s*\/\s*/g, " / ");
-  const uncertain = conf < 75 || !HANGUL.test(ko) || /[^A-Za-z'\- ]/.test(en) || en.split(" ").length > 3;
-  return { id: uid(), en, ko, uncertain };
-}
-
 /* ---------- local storage ---------- */
 export type Session = { date: string; total: number; first: number; after: number; wrong: number };
 export type Weak = Record<string, { ko: string; wrong: number }>;
@@ -83,7 +65,7 @@ const get = <T,>(k: string, d: T): T => {
 };
 export const store = {
   words: () => get<Word[]>("wk_words", []),
-  setWords: (w: Word[]) => localStorage.setItem("wk_words", JSON.stringify(w)),
+  setWords: (w: Word[]) => localStorage.setItem("wk_words", JSON.stringify(w.map(({ crop: _c, ...rest }) => rest))),
   history: () => get<Session[]>("wk_history", []),
   weak: () => get<Weak>("wk_weak", {}),
   record(s: Session, wrongs: { en: string; ko: string; n: number }[]) {
