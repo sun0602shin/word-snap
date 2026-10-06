@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { normalize, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
-import { getWorker, recognizeVocab, type OcrStage } from "@/lib/ocr";
+import { recognizeVocab, warmUp, type OcrResult, type OcrStage } from "@/lib/ocr";
 
 type Stat = { wrong: number; solved: boolean };
 type View = "home" | "photo" | "edit" | "quiz" | "result";
@@ -12,6 +12,7 @@ export function WordKok() {
   const [stats, setStats] = useState<Record<string, Stat>>({});
   const [file, setFile] = useState<File | null>(null);
   const [err, setErr] = useState<string | undefined>();
+  const [summary, setSummary] = useState<{ expected: number; recognized: number; low: number } | null>(null);
 
   useEffect(() => setWords(store.words()), []);
   const save = (w: Word[]) => { setWords(w); store.setWords(w); };
@@ -20,7 +21,7 @@ export function WordKok() {
     if (!f) return;
     setFile(f);
     setView("photo");
-    getWorker().catch(() => {}); // warm up engine while the user checks the photo
+    warmUp(); // download engine data while the user checks the photo
   }
 
   function startQuiz(list: Word[]) {
@@ -34,25 +35,28 @@ export function WordKok() {
     <div className="mx-auto min-h-dvh max-w-2xl px-4 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
       {view === "home" && (
         <Home busy={false} progress={0} saved={words.length} onFile={handleFile}
-          onSample={() => { save(sampleWords()); setErr(undefined); setView("edit"); }}
-          onManual={() => { save([]); setErr(undefined); setView("edit"); }}
-          onContinue={() => { setErr(undefined); setView("edit"); }} />
+          onSample={() => { save(sampleWords()); setErr(undefined); setSummary(null); setView("edit"); }}
+          onManual={() => { save([]); setErr(undefined); setSummary(null); setView("edit"); }}
+          onContinue={() => { setErr(undefined); setSummary(null); setView("edit"); }} />
       )}
       {view === "photo" && file && (
         <PhotoStep file={file} onCancel={() => setView("home")}
-          onDone={(res, e) => { save(res); setErr(e); setView("edit"); }} />
+          onManual={() => { save([]); setErr(undefined); setSummary(null); setView("edit"); }}
+          onDone={(r) => { save(r.words); setSummary(r); setErr(r.words.length ? undefined : "단어를 찾지 못했어요. 직접 입력해 주세요."); setView("edit"); }} />
       )}
-      {view === "edit" && <Editor words={words} onChange={save} error={err} onBack={() => setView("home")} onStart={() => startQuiz(words)} />}
+      {view === "edit" && <Editor words={words} onChange={save} error={err} summary={summary} onBack={() => setView("home")} onStart={() => startQuiz(words)} />}
       {view === "quiz" && <Quiz key={quizSet.map((w) => w.id).join()} words={quizSet} onFinish={(s) => { setStats(s); setView("result"); }} />}
       {view === "result" && <Result words={quizSet} stats={stats} onRetryWrong={(w) => startQuiz(w)} onRetryAll={() => startQuiz(words)} onHome={() => setView("home")} />}
     </div>
   );
 }
 
-function PhotoStep({ file, onCancel, onDone }: { file: File; onCancel: () => void; onDone: (w: Word[], err?: string) => void }) {
+function PhotoStep({ file, onCancel, onManual, onDone }: { file: File; onCancel: () => void; onManual: () => void; onDone: (r: OcrResult) => void }) {
   const [rot, setRot] = useState(0);
   const [url, setUrl] = useState("");
+  const [expected, setExpected] = useState(40);
   const [stage, setStage] = useState<OcrStage | null>(null);
+  const [fail, setFail] = useState<string | null>(null);
   const [sec, setSec] = useState(0);
   useEffect(() => { const u = URL.createObjectURL(file); setUrl(u); return () => URL.revokeObjectURL(u); }, [file]);
   useEffect(() => {
@@ -63,12 +67,18 @@ function PhotoStep({ file, onCancel, onDone }: { file: File; onCancel: () => voi
 
   async function start() {
     setSec(0);
+    setFail(null);
     setStage({ label: "준비 중", progress: 0 });
     try {
-      const res = await recognizeVocab(file, rot, setStage);
-      onDone(res, res.length ? undefined : "단어를 찾지 못했어요. 사진을 다시 찍거나 직접 입력해 주세요.");
-    } catch {
-      onDone([], "글자 인식에 실패했어요. 인터넷 연결을 확인하거나 직접 입력해 주세요.");
+      onDone(await recognizeVocab(file, rot, clamp(expected || 40, 1, 200), setStage));
+    } catch (e) {
+      const m = e instanceof Error ? e.message : "";
+      setStage(null);
+      setFail(
+        m === "NO_LAYOUT" ? "단어 표를 찾지 못했어요. 사진을 바로 세우거나, 단어장이 화면에 꽉 차게 다시 찍어 주세요."
+        : m === "IMAGE" ? "이 사진을 열 수 없어요. 다른 사진을 골라 주세요."
+        : "인식 엔진이나 언어 데이터를 불러오지 못했어요. 인터넷 연결을 확인하고 다시 시도해 주세요.",
+      );
     }
   }
 
@@ -81,13 +91,19 @@ function PhotoStep({ file, onCancel, onDone }: { file: File; onCancel: () => voi
           <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${Math.max(4, Math.round(stage.progress * 100))}%` }} />
         </div>
         <p className="mt-2 text-sm text-muted-foreground">{Math.round(stage.progress * 100)}% · {sec}초</p>
-        <p className="mt-6 max-w-xs text-sm text-muted-foreground">처음 한 번은 언어 데이터를 내려받느라 30초 이상 걸릴 수 있어요. 화면을 켜 둔 채 기다려 주세요.</p>
+        <p className="mt-6 max-w-xs text-sm text-muted-foreground">줄마다 영어와 한국어를 따로 꼼꼼히 읽어서 1~2분 정도 걸릴 수 있어요. 처음 한 번은 언어 데이터도 내려받아요. 화면을 켜 둔 채 기다려 주세요.</p>
       </div>
     );
 
   return (
     <div>
       <Header title="사진 확인" left={<button className="btn-ghost h-11 px-3" onClick={onCancel}>‹ 처음</button>} />
+      {fail && (
+        <div className="mb-3 rounded-2xl bg-warning/15 p-4 font-medium text-warning-foreground">
+          {fail}
+          <button className="btn-soft mt-3 h-12 w-full" onClick={onManual}>직접 입력하기</button>
+        </div>
+      )}
       <p className="mb-3 text-muted-foreground">글자가 바로 서 있도록 돌려 주세요. 단어장이 화면에 꽉 차고 흔들리지 않을수록 잘 읽어요.</p>
       <div className="card flex aspect-square items-center justify-center overflow-hidden p-2">
         {url && <img src={url} alt="선택한 단어장 사진" className="max-h-full max-w-full object-contain transition-transform" style={{ transform: `rotate(${rot}deg)` }} />}
@@ -96,10 +112,16 @@ function PhotoStep({ file, onCancel, onDone }: { file: File; onCancel: () => voi
         <button className="btn-soft h-14" onClick={() => setRot((r) => r - 90)}>↺ 왼쪽으로</button>
         <button className="btn-soft h-14" onClick={() => setRot((r) => r + 90)}>↻ 오른쪽으로</button>
       </div>
-      <button className="btn-primary mt-4 h-16 w-full text-xl" onClick={start}>글자 인식 시작</button>
+      <label className="card mt-3 flex items-center justify-between gap-3 p-4">
+        <span className="font-semibold">이 페이지의 단어 수</span>
+        <input type="number" inputMode="numeric" min={1} max={200} className="field h-12 w-24 text-center text-lg font-bold" value={expected || ""} onChange={(e) => setExpected(parseInt(e.target.value, 10) || 0)} />
+      </label>
+      <button className="btn-primary mt-4 h-16 w-full text-xl" onClick={start}>{fail ? "다시 인식하기" : "글자 인식 시작"}</button>
     </div>
   );
 }
+
+const clamp = (v: number, a: number, b: number) => Math.min(b, Math.max(a, v));
 
 function Header({ title, left }: { title: string; left?: React.ReactNode }) {
   return (
@@ -181,7 +203,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
   );
 }
 
-function Editor({ words, onChange, error, onBack, onStart }: { words: Word[]; onChange: (w: Word[]) => void; error?: string | undefined; onBack: () => void; onStart: () => void }) {
+function Editor({ words, onChange, error, summary, onBack, onStart }: { words: Word[]; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onStart: () => void }) {
   const unsure = words.filter((w) => w.uncertain).length;
   const valid = words.filter((w) => w.en.trim() && w.ko.trim()).length;
   const upd = (id: string, patch: Partial<Word>) => onChange(words.map((w) => (w.id === id ? { ...w, ...patch, uncertain: false } : w)));
@@ -190,8 +212,12 @@ function Editor({ words, onChange, error, onBack, onStart }: { words: Word[]; on
       <Header title="단어 확인" left={<button className="btn-ghost h-11 px-3" onClick={onBack}>‹ 처음</button>} />
       {error && <div className="mb-3 rounded-2xl bg-warning/15 p-4 font-medium text-warning-foreground">{error}</div>}
       <div className="card mb-3 flex items-center justify-between p-4">
-        <span className="text-lg">단어 <b className="text-primary">{words.length}</b>개</span>
-        {unsure > 0 && <span className="rounded-full bg-warning/20 px-3 py-1 text-sm font-semibold text-warning-foreground">⚠️ 확인 필요 {unsure}</span>}
+        {summary ? (
+          <span className="text-lg">인식 <b className="text-primary">{valid}</b>/{summary.expected}</span>
+        ) : (
+          <span className="text-lg">단어 <b className="text-primary">{words.length}</b>개</span>
+        )}
+        {unsure > 0 && <span className="rounded-full bg-warning/20 px-3 py-1 text-sm font-semibold text-warning-foreground">⚠️ 낮은 신뢰도 {unsure}</span>}
       </div>
       <ul className="space-y-2">
         {words.map((w, i) => (
@@ -200,6 +226,7 @@ function Editor({ words, onChange, error, onBack, onStart }: { words: Word[]; on
               <span>{i + 1}{w.uncertain && " · 확인해 주세요"}</span>
               <button className="h-9 rounded-lg px-3 text-destructive active:bg-muted" onClick={() => onChange(words.filter((x) => x.id !== w.id))}>삭제</button>
             </div>
+            {w.crop && <img src={w.crop} alt={`${i + 1}번 줄 원본`} className="mb-2 w-full rounded-lg border border-border bg-card" />}
             <input className="field mb-2" placeholder="영어 단어" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={w.en} onChange={(e) => upd(w.id, { en: e.target.value })} />
             <input className="field" placeholder="한국어 뜻" value={w.ko} onChange={(e) => upd(w.id, { ko: e.target.value })} />
           </li>
