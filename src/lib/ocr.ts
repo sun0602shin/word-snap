@@ -8,7 +8,7 @@
 //    with a dedicated eng / kor worker (single-line mode) on several preprocessing variants;
 //    the highest-confidence valid reading wins.
 // 4. Second pass on empty / low-confidence rows when fewer words than expected were found.
-import { uid, type Word } from "./wordkok";
+import { uid, withSenses, type Word } from "./wordkok";
 
 export type OcrStage = { label: string; progress: number };
 export type OcrResult = { words: Word[]; expected: number; recognized: number; low: number };
@@ -459,7 +459,7 @@ export async function recognizeVocab(file: Blob, rotation: number, expected: num
       if (r.en.text && seen.has(key)) continue;
       seen.add(key);
       const b = cellBoxes(r.row);
-      words.push({ id: uid(), en: r.en.text, ko: r.ko.text, uncertain: isLow(r), crop: thumb(base, { x0: b.en.x0, y0: b.en.y0, x1: b.ko.x1, y1: b.ko.y1 }) });
+      words.push(withSenses({ id: uid(), en: r.en.text, ko: r.ko.text, uncertain: isLow(r), crop: thumb(base, { x0: b.en.x0, y0: b.en.y0, x1: b.ko.x1, y1: b.ko.y1 }) }));
     }
     return { words, expected, recognized, low: words.filter((w) => w.uncertain).length };
   } catch (e) {

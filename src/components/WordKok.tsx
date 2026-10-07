@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { normalize, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
+import { POS_LIST, POS_LABEL, joinSenses, parseMeaning, type Sense } from "@/lib/pos";
+import { withSenses, normalize, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
 import { recognizeVocab, warmUp, type OcrResult, type OcrStage } from "@/lib/ocr";
 
 type Stat = { wrong: number; solved: boolean };
@@ -35,7 +36,7 @@ export function WordKok() {
     <div className="mx-auto min-h-dvh max-w-2xl px-4 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
       {view === "home" && (
         <Home busy={false} progress={0} saved={words.length} onFile={handleFile}
-          onSample={() => { save(sampleWords()); setErr(undefined); setSummary(null); setView("edit"); }}
+          onSample={() => { save(sampleWords().map(withSenses)); setErr(undefined); setSummary(null); setView("edit"); }}
           onManual={() => { save([]); setErr(undefined); setSummary(null); setView("edit"); }}
           onContinue={() => { setErr(undefined); setSummary(null); setView("edit"); }} />
       )}
@@ -228,14 +229,44 @@ function Editor({ words, onChange, error, summary, onBack, onStart }: { words: W
             </div>
             {w.crop && <img src={w.crop} alt={`${i + 1}번 줄 원본`} className="mb-2 w-full rounded-lg border border-border bg-card" />}
             <input className="field mb-2" placeholder="영어 단어" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={w.en} onChange={(e) => upd(w.id, { en: e.target.value })} />
-            <input className="field" placeholder="한국어 뜻" value={w.ko} onChange={(e) => upd(w.id, { ko: e.target.value })} />
+            <SensesEditor senses={w.senses?.length ? w.senses : [{ pos: "", ko: w.ko }]} onChange={(senses) => upd(w.id, { senses, ko: joinSenses(senses) })} />
           </li>
         ))}
       </ul>
-      <button className="btn-soft mt-3 h-14 w-full" onClick={() => onChange([...words, { id: uid(), en: "", ko: "" }])}>+ 단어 추가</button>
+      <button className="btn-soft mt-3 h-14 w-full" onClick={() => onChange([...words, { id: uid(), en: "", ko: "", senses: [{ pos: "", ko: "" }] }])}>+ 단어 추가</button>
       <div className="sticky bottom-0 -mx-4 mt-4 bg-background/90 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur">
         <button className="btn-primary h-16 w-full text-xl" disabled={!valid} onClick={onStart}>퀴즈 시작 ({valid}개)</button>
       </div>
+    </div>
+  );
+}
+
+function SensesEditor({ senses, onChange }: { senses: Sense[]; onChange: (s: Sense[]) => void }) {
+  const set = (i: number, patch: Partial<Sense>) => onChange(senses.map((s, j) => (j === i ? { ...s, ...patch } : s)));
+  // typed "명. 교통 / 동. 수송하다" → split POS out when leaving the field
+  const split = (i: number) => {
+    const parsed = parseMeaning(senses[i]!.ko);
+    if (parsed.length === 1 && !parsed[0]!.pos) return;
+    if (parsed[0] && !parsed[0].pos && senses[i]!.pos) parsed[0].pos = senses[i]!.pos;
+    onChange([...senses.slice(0, i), ...parsed, ...senses.slice(i + 1)]);
+  };
+  return (
+    <div className="space-y-2">
+      {senses.map((s, i) => (
+        <div key={i} className="flex items-center gap-2">
+          <label className="pos-chip" data-empty={!s.pos || undefined}>
+            <span aria-hidden>{s.pos || "품사"}</span>
+            <select aria-label="품사" className="absolute inset-0 opacity-0" value={s.pos} onChange={(e) => set(i, { pos: e.target.value })}>
+              <option value="">없음</option>
+              {POS_LIST.map((p) => <option key={p} value={p}>{p} ({POS_LABEL[p]})</option>)}
+              {s.pos && !(POS_LIST as readonly string[]).includes(s.pos) && <option value={s.pos}>{s.pos}</option>}
+            </select>
+          </label>
+          <input className="field flex-1" placeholder="한국어 뜻" value={s.ko} onChange={(e) => set(i, { ko: e.target.value })} onBlur={() => split(i)} />
+          {senses.length > 1 && <button className="h-11 w-9 shrink-0 rounded-lg text-muted-foreground active:bg-muted" aria-label="뜻 삭제" onClick={() => onChange(senses.filter((_, j) => j !== i))}>✕</button>}
+        </div>
+      ))}
+      <button className="h-9 rounded-lg px-2 text-sm font-semibold text-secondary-foreground active:bg-muted" onClick={() => onChange([...senses, { pos: "", ko: "" }])}>+ 품사·뜻 추가</button>
     </div>
   );
 }
