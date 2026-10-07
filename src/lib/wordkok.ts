@@ -1,4 +1,12 @@
-export type Word = { id: string; en: string; ko: string; uncertain?: boolean; crop?: string };
+import { joinSenses, parseMeaning, type Sense } from "./pos";
+
+export type Word = { id: string; en: string; ko: string; senses?: Sense[]; uncertain?: boolean; crop?: string };
+
+/** Ensure senses exist and ko is the POS-free meaning text. */
+export function withSenses(w: Word): Word {
+  const senses = w.senses?.length ? w.senses : parseMeaning(w.ko);
+  return { ...w, senses, ko: joinSenses(senses) };
+}
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -64,7 +72,7 @@ const get = <T,>(k: string, d: T): T => {
   try { return JSON.parse(localStorage.getItem(k) || "") as T; } catch { return d; }
 };
 export const store = {
-  words: () => get<Word[]>("wk_words", []),
+  words: () => get<Word[]>("wk_words", []).map(withSenses),
   setWords: (w: Word[]) => localStorage.setItem("wk_words", JSON.stringify(w.map(({ crop: _c, ...rest }) => rest))),
   history: () => get<Session[]>("wk_history", []),
   weak: () => get<Weak>("wk_weak", {}),

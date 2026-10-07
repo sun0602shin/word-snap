@@ -190,3 +190,9 @@
   border: 5px solid var(--muted); border-top-color: var(--primary);
   animation: spin 0.9s linear infinite;
 }
+@utility pos-chip {
+  position: relative; display: inline-flex; align-items: center; justify-content: center;
+  min-width: 2.75rem; height: 2.75rem; padding: 0 0.5rem; border-radius: 9999px; flex-shrink: 0;
+  background: var(--secondary); color: var(--secondary-foreground); font-size: 0.875rem; font-weight: 700;
+  &[data-empty] { background: transparent; color: var(--muted-foreground); border: 1.5px dashed var(--border); font-weight: 500; font-size: 0.75rem; }
+}
