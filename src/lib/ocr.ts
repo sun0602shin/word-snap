@@ -9,6 +9,7 @@
 //    the highest-confidence valid reading wins.
 // 4. Second pass on empty / low-confidence rows when fewer words than expected were found.
 import { uid, withSenses, type Word } from "./wordkok";
+import { parseMeaning } from "./pos";
 
 export type OcrStage = { label: string; progress: number };
 export type OcrResult = { words: Word[]; expected: number; recognized: number; low: number };
@@ -77,13 +78,39 @@ export async function resetWorkers() {
   }
 }
 
-async function setMode(w: TW, mode: "sparse" | "enLine" | "koLine") {
+async function setMode(w: TW, mode: "sparse" | "enLine" | "koLine" | "pos") {
   if (modes.get(w) === mode) return;
   const T = await import("tesseract.js");
   if (mode === "sparse") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SPARSE_TEXT, tessedit_char_whitelist: "", tessedit_char_blacklist: "" });
   if (mode === "enLine") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE, tessedit_char_whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-' ", tessedit_char_blacklist: "" });
   if (mode === "koLine") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE, tessedit_char_whitelist: "", tessedit_char_blacklist: "0123456789|_@#$%^&*=+<>{}[]" });
+  if (mode === "pos") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_WORD, tessedit_char_whitelist: "명동형부전접대감.", tessedit_char_blacklist: "" });
   modes.set(w, mode);
+}
+
+/** Rotate a canvas by a small angle (deskew), white background, same size. */
+function rotated(src: HTMLCanvasElement, deg: number) {
+  const c = newCanvas(src.width, src.height);
+  const x = ctx2d(c);
+  x.fillStyle = "#fff";
+  x.fillRect(0, 0, c.width, c.height);
+  x.translate(c.width / 2, c.height / 2);
+  x.rotate((deg * Math.PI) / 180);
+  x.imageSmoothingQuality = "high";
+  x.drawImage(src, -src.width / 2, -src.height / 2);
+  return c;
+}
+
+/** Page skew from text-line baselines (degrees, positive = clockwise text). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function skewOf(blocks: any[]): number {
+  const a: number[] = [];
+  for (const b of blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) {
+    const bl = l.baseline;
+    if (!bl || bl.x1 - bl.x0 < 60) continue;
+    a.push((Math.atan2(bl.y1 - bl.y0, bl.x1 - bl.x0) * 180) / Math.PI);
+  }
+  return a.length >= 3 ? median(a) : 0;
 }
 
 /* ---------------- image helpers ---------------- */
@@ -381,7 +408,41 @@ async function bestRead(lang: Lang, base: HTMLCanvasElement, b: Box, scale: numb
   return best;
 }
 
-type RowResult = { row: Row; en: Read; ko: Read };
+type RowResult = { row: Row; en: Read; ko: Read; pos?: { text: string; conf: number } };
+
+/** Dedicated read of the part-of-speech marker area at the start of the meaning cell. */
+async function readPos(base: HTMLCanvasElement, ko: Box, mh: number, scale: number) {
+  const w = await getWorker("kor");
+  await setMode(w, "pos");
+  const box = { x0: ko.x0, y0: ko.y0, x1: Math.min(ko.x1, ko.x0 + mh * 3.2), y1: ko.y1 };
+  let best = { text: "", conf: 0 };
+  for (const v of ["c", "t"] as const) {
+    const c0 = cropScaled(base, box, scale + 0.5);
+    const c = v === "t" ? thresholdVariant(c0) : c0;
+    try {
+      const r = await w.recognize(c);
+      const t = (r.data.text ?? "").replace(/[^명동형부전접대감]/g, "").slice(0, 1);
+      const conf = r.data.confidence ?? 0;
+      if (t && conf > best.conf) best = { text: t, conf };
+    } finally { if (c !== c0) free(c); free(c0); }
+    if (best.conf >= 80) break;
+  }
+  return best;
+}
+
+/** Combine the meaning text with the separately read POS marker. */
+function mergePos(ko: string, pos?: { text: string; conf: number }) {
+  const senses = parseMeaning(ko);
+  let auto = senses.some((s) => s.pos);
+  if (pos?.text && pos.conf >= 55 && !senses[0]!.pos) {
+    // drop a misread single-glyph marker left at the start ("@ 교통", "명 교통" read as "멍")
+    const first = senses[0]!.ko.match(/^(\S)(\.|\s)\s*/);
+    if (first && !/[,]/.test(first[0]) && senses[0]!.ko.length > first[0].length) senses[0]!.ko = senses[0]!.ko.slice(first[0].length);
+    senses[0]!.pos = pos.text;
+    auto = true;
+  }
+  return { senses, auto };
+}
 const isOk = (r: RowResult) => EN_VALID.test(r.en.text) && hangulCount(r.ko.text) > 0;
 const isLow = (r: RowResult) => !isOk(r) || r.en.conf < 75 || r.ko.conf < 65;
 
