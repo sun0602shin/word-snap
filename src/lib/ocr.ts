@@ -407,7 +407,41 @@ async function bestRead(lang: Lang, base: HTMLCanvasElement, b: Box, scale: numb
   return best;
 }
 
-type RowResult = { row: Row; en: Read; ko: Read };
+type RowResult = { row: Row; en: Read; ko: Read; pos?: { text: string; conf: number } };
+
+/** Dedicated read of the part-of-speech marker area at the start of the meaning cell. */
+async function readPos(base: HTMLCanvasElement, ko: Box, mh: number, scale: number) {
+  const w = await getWorker("kor");
+  await setMode(w, "pos");
+  const box = { x0: ko.x0, y0: ko.y0, x1: Math.min(ko.x1, ko.x0 + mh * 3.2), y1: ko.y1 };
+  let best = { text: "", conf: 0 };
+  for (const v of ["c", "t"] as const) {
+    const c0 = cropScaled(base, box, scale + 0.5);
+    const c = v === "t" ? thresholdVariant(c0) : c0;
+    try {
+      const r = await w.recognize(c);
+      const t = (r.data.text ?? "").replace(/[^명동형부전접대감]/g, "").slice(0, 1);
+      const conf = r.data.confidence ?? 0;
+      if (t && conf > best.conf) best = { text: t, conf };
+    } finally { if (c !== c0) free(c); free(c0); }
+    if (best.conf >= 80) break;
+  }
+  return best;
+}
+
+/** Combine the meaning text with the separately read POS marker. */
+function mergePos(ko: string, pos?: { text: string; conf: number }) {
+  const senses = parseMeaning(ko);
+  let auto = senses.some((s) => s.pos);
+  if (pos?.text && pos.conf >= 55 && !senses[0]!.pos) {
+    // drop a misread single-glyph marker left at the start ("@ 교통", "명 교통" read as "멍")
+    const first = senses[0]!.ko.match(/^(\S)(\.|\s)\s*/);
+    if (first && !/[,]/.test(first[0]) && senses[0]!.ko.length > first[0].length) senses[0]!.ko = senses[0]!.ko.slice(first[0].length);
+    senses[0]!.pos = pos.text;
+    auto = true;
+  }
+  return { senses, auto };
+}
 const isOk = (r: RowResult) => EN_VALID.test(r.en.text) && hangulCount(r.ko.text) > 0;
 const isLow = (r: RowResult) => !isOk(r) || r.en.conf < 75 || r.ko.conf < 65;
 
