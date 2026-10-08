@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { POS_LIST, POS_LABEL, joinSenses, parseMeaning, type Sense } from "@/lib/pos";
 import { withSenses, normalize, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
 import { recognizeVocab, warmUp, type OcrResult, type OcrStage } from "@/lib/ocr";
+import { applyFix } from "@/lib/dict";
 
 type Stat = { wrong: number; solved: boolean };
 type View = "home" | "photo" | "edit" | "quiz" | "result";
@@ -208,13 +209,22 @@ function Editor({ words, onChange, error, summary, onBack, onStart }: { words: W
   const unsure = words.filter((w) => w.uncertain).length;
   const valid = words.filter((w) => w.en.trim() && w.ko.trim()).length;
   const upd = (id: string, patch: Partial<Word>) => onChange(words.map((w) => (w.id === id ? { ...w, ...patch, uncertain: false } : w)));
+  const resolveFix = (id: string, fixId: string, accept: boolean) => onChange(words.map((w) => {
+    if (w.id !== id) return w;
+    const f = w.fixes?.find((x) => x.id === fixId);
+    if (!f) return w;
+    const fixes = w.fixes?.map((x) => x.id === fixId ? { ...x, status: accept ? "accepted" as const : "ignored" as const } : x);
+    if (!accept) return { ...w, fixes };
+    const result = applyFix({ en: w.en, senses: w.senses ?? parseMeaning(w.ko) }, f);
+    return { ...w, en: result.en, senses: result.senses, ko: joinSenses(result.senses), fixes };
+  }));
   return (
     <div>
       <Header title="단어 확인" left={<button className="btn-ghost h-11 px-3" onClick={onBack}>‹ 처음</button>} />
       {error && <div className="mb-3 rounded-2xl bg-warning/15 p-4 font-medium text-warning-foreground">{error}</div>}
       <div className="card mb-3 flex items-center justify-between p-4">
         {summary ? (
-          <span className="text-lg">인식 <b className="text-primary">{valid}</b>/{summary.expected}</span>
+          <span className="text-lg">인식 <b className="text-primary">{valid}</b>/{summary.expected} <span className="text-xs text-muted-foreground">OCR v3</span></span>
         ) : (
           <span className="text-lg">단어 <b className="text-primary">{words.length}</b>개</span>
         )}
@@ -230,6 +240,16 @@ function Editor({ words, onChange, error, summary, onBack, onStart }: { words: W
             {w.crop && <img src={w.crop} alt={`${i + 1}번 줄 원본`} className="mb-2 w-full rounded-lg border border-border bg-card" />}
             <input className="field mb-2" placeholder="영어 단어" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={w.en} onChange={(e) => upd(w.id, { en: e.target.value })} />
             <SensesEditor senses={w.senses?.length ? w.senses : [{ pos: "", ko: w.ko }]} onChange={(senses) => upd(w.id, { senses, ko: joinSenses(senses) })} />
+            {w.fixes?.filter((f) => f.status === "suggest").map((f) => (
+              <div key={f.id} className="mt-2 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm">
+                <p className="font-semibold">사전 확인: {f.from || "(빈칸)"} → {f.to}</p>
+                <p className="mt-1 text-muted-foreground">{f.reason}</p>
+                <div className="mt-2 flex gap-2">
+                  <button type="button" className="btn-soft min-h-10 flex-1" onClick={() => resolveFix(w.id, f.id, true)}>수정 적용</button>
+                  <button type="button" className="btn-ghost min-h-10 flex-1" onClick={() => resolveFix(w.id, f.id, false)}>원문 유지</button>
+                </div>
+              </div>
+            ))}
           </li>
         ))}
       </ul>
