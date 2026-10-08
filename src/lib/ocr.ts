@@ -411,35 +411,46 @@ async function bestRead(lang: Lang, base: HTMLCanvasElement, b: Box, scale: numb
 
 type RowResult = { row: Row; en: Read; ko: Read; pos?: { text: string; conf: number } };
 
-/** Dedicated read of the part-of-speech marker area at the start of the meaning cell. */
+/** The tiny boxed POS glyph must be read independently of the meaning. */
 async function readPos(base: HTMLCanvasElement, ko: Box, mh: number, scale: number) {
   const w = await getWorker("kor");
   await setMode(w, "pos");
-  const box = { x0: ko.x0, y0: ko.y0, x1: Math.min(ko.x1, ko.x0 + mh * 3.2), y1: ko.y1 };
   let best = { text: "", conf: 0 };
-  for (const v of ["c", "t"] as const) {
-    const c0 = cropScaled(base, box, scale + 0.5);
-    const c = v === "t" ? thresholdVariant(c0) : c0;
-    try {
-      const r = await w.recognize(c);
-      const t = (r.data.text ?? "").replace(/[^명동형부전접대감]/g, "").slice(0, 1);
-      const conf = r.data.confidence ?? 0;
-      if (t && conf > best.conf) best = { text: t, conf };
-    } finally { if (c !== c0) free(c); free(c0); }
-    if (best.conf >= 80) break;
+  // The badge can be inset slightly from the English/Korean column divider.
+  // Test several narrow crops instead of including the first Korean meaning.
+  for (const offset of [0, 0.35, 0.7]) {
+    for (const width of [1.2, 1.65, 2.1]) {
+      const x0 = ko.x0 + mh * offset;
+      const box = { x0, y0: ko.y0, x1: Math.min(ko.x1, x0 + mh * width), y1: ko.y1 };
+      if (box.x1 <= box.x0) continue;
+      for (const variant of ["c", "t"] as const) {
+        const c0 = cropScaled(base, box, Math.max(2.5, scale));
+        const c = variant === "t" ? thresholdVariant(c0) : c0;
+        try {
+          const r = await w.recognize(c);
+          const raw = (r.data.text ?? "").trim().replace(/[.\s\[\](){}□■▣]/g, "");
+          if (!/^[명동형부전접대감]$/.test(raw)) continue;
+          const conf = r.data.confidence ?? 0;
+          if (conf > best.conf) best = { text: raw, conf };
+        } finally { if (c !== c0) free(c); free(c0); }
+        if (best.conf >= 90) return best;
+      }
+    }
   }
   return best;
 }
 
-/** Combine the meaning text with the separately read POS marker. */
+/** Strip OCR noise only when a POS badge was independently recognized. */
 function mergePos(ko: string, pos?: { text: string; conf: number }) {
   const senses = parseMeaning(ko);
   let auto = senses.some((s) => s.pos);
-  if (pos?.text && pos.conf >= 70 && senses.length && !senses[0]!.pos) {
-    // drop a misread single-glyph marker left at the start ("@ 교통", "명 교통" read as "멍")
-    // Do not strip arbitrary first syllables: they may be part of the actual meaning.
-    senses[0]!.ko = senses[0]!.ko.replace(/^[^가-힣\w]?\s*[.·:]\s*/, "");
-    senses[0]!.pos = pos.text;
+  if (!pos?.text || pos.conf < 60 || !senses.length) return { senses, auto };
+  const first = senses[0]!;
+  if (!first.pos) {
+    // Typical Tesseract errors: a boxed 名/명 becomes '림', '멍', or an isolated glyph.
+    // Do not strip a plausible full Korean word, or the start of an actual meaning.
+    first.ko = first.ko.replace(/^(?:[□■▣@]|[가-힣])(?=\s*[.·,:;]\s*|\s{1,3})(?:[.·,:;]\s*|\s{1,3})/, "").trim();
+    first.pos = pos.text;
     auto = true;
   }
   return { senses, auto };

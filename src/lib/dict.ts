@@ -65,7 +65,7 @@ export function lev(a: string | string[], b: string | string[], max = 9): number
   return prev[n]!;
 }
 // OCR-confusable letter pairs cost less (l/i/1, rn/m, c/e, …)
-const CONF = new Set(["li", "il", "ce", "ec", "oa", "ao", "nu", "un", "ft", "tf", "hb", "bh", "vy", "yv", "nr", "rn"]);
+const CONF = new Set(["li", "il", "ce", "ec", "oa", "ao", "nu", "un", "ft", "tf", "hb", "bh", "vy", "yv", "vw", "wv", "nr", "rn"]);
 function ocrDist(a: string, b: string) {
   const d = lev(a, b, 3);
   if (d !== 1 || a.length !== b.length) return d;
@@ -89,7 +89,7 @@ async function enCandidates(w: string) {
   const out: { w: string; d: number; ko: string[] }[] = [];
   for (const s of await Promise.all([...names].map(shard)))
     for (const k in s) {
-      if (Math.abs(k.length - w.length) > 1 || k[0] !== w[0] && k[k.length - 1] !== w[w.length - 1]) continue;
+      if (Math.abs(k.length - w.length) > 1 || (k[0] !== w[0] && k[k.length - 1] !== w[w.length - 1] && !((k[0] === "w" && w[0] === "v") || (k[0] === "v" && w[0] === "w")))) continue;
       const d = ocrDist(w, k);
       if (d <= 2) out.push({ w: k, d, ko: s[k]! });
     }
