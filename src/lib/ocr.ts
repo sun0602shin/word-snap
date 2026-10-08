@@ -9,6 +9,7 @@
 //    the highest-confidence valid reading wins.
 // 4. Second pass on empty / low-confidence rows when fewer words than expected were found.
 import { uid, withSenses, type Word } from "./wordkok";
+import { parseMeaning } from "./pos";
 
 export type OcrStage = { label: string; progress: number };
 export type OcrResult = { words: Word[]; expected: number; recognized: number; low: number };
