@@ -9,7 +9,8 @@
 //    the highest-confidence valid reading wins.
 // 4. Second pass on empty / low-confidence rows when fewer words than expected were found.
 import { uid, withSenses, type Word } from "./wordkok";
-import { parseMeaning } from "./pos";
+import { parseMeaning, joinSenses } from "./pos";
+import { verifyAll } from "./dict";
 
 export type OcrStage = { label: string; progress: number };
 export type OcrResult = { words: Word[]; expected: number; recognized: number; low: number };
@@ -434,10 +435,10 @@ async function readPos(base: HTMLCanvasElement, ko: Box, mh: number, scale: numb
 function mergePos(ko: string, pos?: { text: string; conf: number }) {
   const senses = parseMeaning(ko);
   let auto = senses.some((s) => s.pos);
-  if (pos?.text && pos.conf >= 55 && !senses[0]!.pos) {
+  if (pos?.text && pos.conf >= 70 && senses.length && !senses[0]!.pos) {
     // drop a misread single-glyph marker left at the start ("@ 교통", "명 교통" read as "멍")
-    const first = senses[0]!.ko.match(/^(\S)(\.|\s)\s*/);
-    if (first && !/[,]/.test(first[0]) && senses[0]!.ko.length > first[0].length) senses[0]!.ko = senses[0]!.ko.slice(first[0].length);
+    // Do not strip arbitrary first syllables: they may be part of the actual meaning.
+    senses[0]!.ko = senses[0]!.ko.replace(/^[^가-힣\w]?\s*[.·:]\s*/, "");
     senses[0]!.pos = pos.text;
     auto = true;
   }
@@ -511,7 +512,19 @@ export async function recognizeVocab(file: Blob, rotation: number, expected: num
       recognized = results.filter(isOk).length;
     }
 
-    onStage({ label: "단어 정리 중", progress: 0.99 });
+    // A separate OCR pass is needed: ordinary Korean OCR often treats the printed
+    // one-character POS abbreviation as part of the meaning or drops it entirely.
+    // Only probe rows without a POS marker in the ordinary reading.
+    for (let i = 0; i < results.length; i++) {
+      const r = results[i]!;
+      if (!hangulCount(r.ko.text) || parseMeaning(r.ko.text).some((s) => s.pos)) continue;
+      const bx = cellBoxes(r.row);
+      try { r.pos = await readPos(base, bx.ko, mh, scale); }
+      catch { /* Keep the original meaning when the POS pass fails. */ }
+      onStage({ label: `품사 확인 중 (${i + 1}/${results.length})`, progress: 0.95 + 0.02 * ((i + 1) / results.length) });
+    }
+
+    onStage({ label: "단어 정리 중", progress: 0.97 });
     const words: Word[] = [];
     const seen = new Set<string>();
     for (const r of results) {
@@ -520,9 +533,29 @@ export async function recognizeVocab(file: Blob, rotation: number, expected: num
       if (r.en.text && seen.has(key)) continue;
       seen.add(key);
       const b = cellBoxes(r.row);
-      words.push(withSenses({ id: uid(), en: r.en.text, ko: r.ko.text, uncertain: isLow(r), crop: thumb(base, { x0: b.en.x0, y0: b.en.y0, x1: b.ko.x1, y1: b.ko.y1 }) }));
+      const merged = mergePos(r.ko.text, r.pos);
+      words.push(withSenses({
+        id: uid(), en: r.en.text, ko: joinSenses(merged.senses), senses: merged.senses,
+        enConf: r.en.conf, koConf: r.ko.conf, posAuto: merged.auto,
+        uncertain: isLow(r),
+        crop: thumb(base, { x0: b.en.x0, y0: b.en.y0, x1: b.ko.x1, y1: b.ko.y1 }),
+      }));
     }
-    return { words, expected, recognized, low: words.filter((w) => w.uncertain).length };
+    // Verify against the bundled local English↔Korean dictionary. Keep the
+    // textbook's meanings, and attach suggestions instead of silently replacing
+    // uncertain readings. Network/dictionary failure must never discard OCR rows.
+    onStage({ label: "영한·한영 사전 교차검증 중", progress: 0.98 });
+    const verified = await verifyAll(words.map((w) => ({
+      en: w.en, senses: w.senses ?? [], enConf: w.enConf, koConf: w.koConf,
+    })));
+    const checked = words.map((w, i) => {
+      const v = verified[i]!;
+      return withSenses({ ...w, en: v.en, senses: v.senses, fixes: v.fixes,
+        dict: v.dict, uncertain: !!w.uncertain || v.dict === "unknown" || v.fixes.some((f) => f.status === "suggest"),
+      });
+    });
+    onStage({ label: "인식 완료", progress: 1 });
+    return { words: checked, expected, recognized: checked.filter((w) => w.en && w.ko).length, low: checked.filter((w) => w.uncertain).length };
   } catch (e) {
     const msg = e instanceof Error ? e.message : "";
     if (msg !== "NO_LAYOUT" && msg !== "IMAGE") await resetWorkers();
