@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { POS_LIST, POS_LABEL, joinSenses, parseMeaning, type Sense } from "@/lib/pos";
-import { withSenses, normalize, sampleWords, shuffle, store, uid, type Session, type Weak, type Word } from "@/lib/wordkok";
+import { withSenses, normalize, sampleWords, shuffle, store, uid, parseFile, type Session, type Weak, type Word } from "@/lib/wordkok";
 import { recognizeVocab, warmUp, type OcrResult, type OcrStage } from "@/lib/ocr";
 import { applyFix } from "@/lib/dict";
 
@@ -19,6 +19,24 @@ export function WordKok() {
   useEffect(() => setWords(store.words()), []);
   const save = (w: Word[]) => { setWords(w); store.setWords(w); };
 
+  async function importChatGPTJson(f?: File) {
+    if (!f) return;
+    try {
+      const parsed = parseFile(await f.text());
+      if (parsed.kind !== "book") throw new Error("단어장 JSON만 가져올 수 있어요.");
+      if (!parsed.book.words.length) throw new Error("단어가 없는 파일이에요.");
+      // Keep the imported book in the existing local library.
+      store.saveBook(parsed.book);
+      save(parsed.book.words);
+      setSummary(null);
+      setErr(undefined);
+      setView("edit");
+    } catch (e) {
+      setErr(e instanceof Error ? `가져오기 실패: ${e.message}` : "가져오기에 실패했어요.");
+      setView("home");
+    }
+  }
+
   function handleFile(f?: File) {
     if (!f) return;
     setFile(f);
@@ -36,7 +54,7 @@ export function WordKok() {
   return (
     <div className="mx-auto min-h-dvh max-w-2xl px-4 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
       {view === "home" && (
-        <Home busy={false} progress={0} saved={words.length} onFile={handleFile}
+        <Home busy={false} progress={0} saved={words.length} onFile={handleFile} onImport={importChatGPTJson} importError={err}
           onSample={() => { save(sampleWords().map(withSenses)); setErr(undefined); setSummary(null); setView("edit"); }}
           onManual={() => { save([]); setErr(undefined); setSummary(null); setView("edit"); }}
           onContinue={() => { setErr(undefined); setSummary(null); setView("edit"); }} />
@@ -134,9 +152,10 @@ function Header({ title, left }: { title: string; left?: React.ReactNode }) {
   );
 }
 
-function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: File) => void; onSample: () => void; onManual: () => void; onContinue: () => void }) {
+function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string; onSample: () => void; onManual: () => void; onContinue: () => void }) {
   const cam = useRef<HTMLInputElement>(null);
   const lib = useRef<HTMLInputElement>(null);
+  const json = useRef<HTMLInputElement>(null);
   const [weak, setWeak] = useState<Weak>({});
   const [hist, setHist] = useState<Session[]>([]);
   useEffect(() => { setWeak(store.weak()); setHist(store.history()); }, []);
@@ -154,6 +173,8 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
 
       <input ref={cam} type="file" accept="image/*" capture="environment" hidden onChange={(e) => p.onFile(e.target.files?.[0])} />
       <input ref={lib} type="file" accept="image/*" hidden onChange={(e) => p.onFile(e.target.files?.[0])} />
+      <input ref={json} type="file" accept=".json,application/json" hidden onChange={(e) => { p.onImport(e.target.files?.[0]); e.target.value = ""; }} />
+      {p.importError && <div role="alert" className="rounded-xl bg-warning/15 p-3 text-warning-foreground">{p.importError}</div>}
 
       {p.busy ? (
         <div className="card p-6 text-center">
@@ -167,6 +188,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
         <div className="grid gap-3">
           <button className="btn-primary h-20 text-xl" onClick={() => cam.current?.click()}>📷 단어장 사진 찍기</button>
           <button className="btn-soft h-16 text-lg" onClick={() => lib.current?.click()}>🖼️ 사진 보관함에서 고르기</button>
+          <button className="btn-soft h-16 text-lg" onClick={() => json.current?.click()}>✨ ChatGPT 단어장 가져오기 (.json)</button>
           <div className="grid grid-cols-2 gap-3">
             <button className="btn-soft h-14" onClick={p.onManual}>✏️ 직접 입력</button>
             <button className="btn-soft h-14" onClick={p.onSample}>📘 DAY 20 샘플</button>
