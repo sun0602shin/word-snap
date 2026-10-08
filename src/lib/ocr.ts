@@ -77,13 +77,39 @@ export async function resetWorkers() {
   }
 }
 
-async function setMode(w: TW, mode: "sparse" | "enLine" | "koLine") {
+async function setMode(w: TW, mode: "sparse" | "enLine" | "koLine" | "pos") {
   if (modes.get(w) === mode) return;
   const T = await import("tesseract.js");
   if (mode === "sparse") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SPARSE_TEXT, tessedit_char_whitelist: "", tessedit_char_blacklist: "" });
   if (mode === "enLine") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE, tessedit_char_whitelist: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-' ", tessedit_char_blacklist: "" });
   if (mode === "koLine") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_LINE, tessedit_char_whitelist: "", tessedit_char_blacklist: "0123456789|_@#$%^&*=+<>{}[]" });
+  if (mode === "pos") await w.setParameters({ tessedit_pageseg_mode: T.PSM.SINGLE_WORD, tessedit_char_whitelist: "명동형부전접대감.", tessedit_char_blacklist: "" });
   modes.set(w, mode);
+}
+
+/** Rotate a canvas by a small angle (deskew), white background, same size. */
+function rotated(src: HTMLCanvasElement, deg: number) {
+  const c = newCanvas(src.width, src.height);
+  const x = ctx2d(c);
+  x.fillStyle = "#fff";
+  x.fillRect(0, 0, c.width, c.height);
+  x.translate(c.width / 2, c.height / 2);
+  x.rotate((deg * Math.PI) / 180);
+  x.imageSmoothingQuality = "high";
+  x.drawImage(src, -src.width / 2, -src.height / 2);
+  return c;
+}
+
+/** Page skew from text-line baselines (degrees, positive = clockwise text). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function skewOf(blocks: any[]): number {
+  const a: number[] = [];
+  for (const b of blocks ?? []) for (const p of b.paragraphs ?? []) for (const l of p.lines ?? []) {
+    const bl = l.baseline;
+    if (!bl || bl.x1 - bl.x0 < 60) continue;
+    a.push((Math.atan2(bl.y1 - bl.y0, bl.x1 - bl.x0) * 180) / Math.PI);
+  }
+  return a.length >= 3 ? median(a) : 0;
 }
 
 /* ---------------- image helpers ---------------- */
