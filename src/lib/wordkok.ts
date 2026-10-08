@@ -1,6 +1,10 @@
 import { joinSenses, parseMeaning, type Sense } from "./pos";
+import type { Fix } from "./dict";
 
-export type Word = { id: string; en: string; ko: string; senses?: Sense[]; uncertain?: boolean; crop?: string };
+export type Word = {
+  id: string; en: string; ko: string; senses?: Sense[]; uncertain?: boolean; crop?: string;
+  enConf?: number; koConf?: number; posAuto?: boolean; fixes?: Fix[]; dict?: "ok" | "fixed" | "unknown";
+};
 
 /** Ensure senses exist and ko is the POS-free meaning text. */
 export function withSenses(w: Word): Word {
