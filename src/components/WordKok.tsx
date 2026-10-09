@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { POS_LIST, POS_LABEL, joinSenses, parseMeaning, type Sense } from "@/lib/pos";
-import { withSenses, normalize, sampleWords, shuffle, store, uid, parseFile, type Session, type Weak, type Word } from "@/lib/wordkok";
+import { withSenses, normalize, sampleWords, shuffle, store, uid, parseFile, type Book, type Session, type Weak, type Word } from "@/lib/wordkok";
 import { recognizeVocab, warmUp, type OcrResult, type OcrStage } from "@/lib/ocr";
 import { applyFix } from "@/lib/dict";
 
@@ -10,13 +10,17 @@ type View = "home" | "photo" | "edit" | "quiz" | "result";
 export function WordKok() {
   const [view, setView] = useState<View>("home");
   const [words, setWords] = useState<Word[]>([]);
+  const [books, setBooks] = useState<Book[]>([]);
+  const [activeBookId, setActiveBookId] = useState<string | null>(null);
+  const [notice, setNotice] = useState("");
   const [quizSet, setQuizSet] = useState<Word[]>([]);
   const [stats, setStats] = useState<Record<string, Stat>>({});
   const [file, setFile] = useState<File | null>(null);
   const [err, setErr] = useState<string | undefined>();
   const [summary, setSummary] = useState<{ expected: number; recognized: number; low: number } | null>(null);
 
-  useEffect(() => setWords(store.words()), []);
+  useEffect(() => { setWords(store.words()); setBooks(store.books()); }, []);
+  const refreshBooks = () => setBooks(store.books());
   const save = (w: Word[]) => { setWords(w); store.setWords(w); };
 
   async function importChatGPTJson(f?: File) {
@@ -26,20 +30,66 @@ export function WordKok() {
       if (parsed.kind !== "book") throw new Error("단어장 JSON만 가져올 수 있어요.");
       if (!parsed.book.words.length) throw new Error("단어가 없는 파일이에요.");
       // Keep the imported book in the existing local library.
-      store.saveBook(parsed.book);
-      save(parsed.book.words);
+      const exists = store.books().some((b) => b.id === parsed.book.id);
+      const incoming = exists ? { ...parsed.book, id: uid(), title: `${parsed.book.title} (추가)` } : parsed.book;
+      store.saveBook(incoming);
+      refreshBooks();
       setSummary(null);
       setErr(undefined);
-      setView("edit");
+      setNotice(`「${incoming.title}」 단어장 ${incoming.words.length}개를 저장했어요.`);
+      setView("home");
     } catch (e) {
       setErr(e instanceof Error ? `가져오기 실패: ${e.message}` : "가져오기에 실패했어요.");
       setView("home");
     }
   }
 
+  function openBook(book: Book) {
+    setActiveBookId(book.id);
+    save(book.words);
+    setErr(undefined);
+    setSummary(null);
+    setNotice("");
+    setView("edit");
+  }
+
+  function saveCurrentBook() {
+    const valid = words.filter((w) => w.en.trim() && w.ko.trim());
+    if (!valid.length) { setErr("저장할 단어를 하나 이상 입력해 주세요."); return; }
+    const old = books.find((b) => b.id === activeBookId);
+    const title = old?.title ?? window.prompt("단어장 이름을 입력해 주세요.", `새 단어장 ${new Date().toLocaleDateString("ko-KR")}`)?.trim();
+    if (!title) return;
+    const now = new Date().toISOString();
+    const book: Book = { id: old?.id ?? uid(), title, words: valid, createdAt: old?.createdAt ?? now, updatedAt: now };
+    try {
+      store.saveBook(book);
+      refreshBooks();
+      setActiveBookId(book.id);
+      setErr(undefined);
+      setNotice(`「${title}」 저장 완료!`);
+      setView("home");
+    } catch { setErr("저장 공간이 부족해요. 백업 후 불필요한 단어장을 정리해 주세요."); }
+  }
+
+  function renameBook(book: Book) {
+    const title = window.prompt("단어장 이름 변경", book.title)?.trim();
+    if (!title || title === book.title) return;
+    store.saveBook({ ...book, title: title.slice(0, 60) });
+    refreshBooks();
+  }
+
+  function deleteBook(book: Book) {
+    if (!window.confirm(`「${book.title}」 단어장을 삭제할까요?\n${book.words.length}개 단어가 삭제됩니다.`)) return;
+    store.deleteBook(book.id);
+    if (activeBookId === book.id) setActiveBookId(null);
+    refreshBooks();
+    setNotice(`「${book.title}」 단어장을 삭제했어요.`);
+  }
+
   function handleFile(f?: File) {
     if (!f) return;
     setFile(f);
+    setActiveBookId(null);
     setView("photo");
     warmUp(); // download engine data while the user checks the photo
   }
@@ -54,17 +104,17 @@ export function WordKok() {
   return (
     <div className="mx-auto min-h-dvh max-w-2xl px-4 pb-10 pt-[max(1rem,env(safe-area-inset-top))]">
       {view === "home" && (
-        <Home busy={false} progress={0} saved={words.length} onFile={handleFile} onImport={importChatGPTJson} importError={err}
-          onSample={() => { save(sampleWords().map(withSenses)); setErr(undefined); setSummary(null); setView("edit"); }}
-          onManual={() => { save([]); setErr(undefined); setSummary(null); setView("edit"); }}
-          onContinue={() => { setErr(undefined); setSummary(null); setView("edit"); }} />
+        <Home busy={false} progress={0} saved={words.length} books={books} notice={notice} onOpenBook={openBook} onQuizBook={(b) => { setActiveBookId(b.id); save(b.words); startQuiz(b.words); }} onRenameBook={renameBook} onDeleteBook={deleteBook} onFile={handleFile} onImport={importChatGPTJson} importError={err}
+          onSample={() => { setActiveBookId(null); save(sampleWords().map(withSenses)); setErr(undefined); setSummary(null); setView("edit"); }}
+          onManual={() => { setActiveBookId(null); save([]); setErr(undefined); setSummary(null); setView("edit"); }}
+          onContinue={() => { setActiveBookId(null); setErr(undefined); setSummary(null); setView("edit"); }} />
       )}
       {view === "photo" && file && (
         <PhotoStep file={file} onCancel={() => setView("home")}
-          onManual={() => { save([]); setErr(undefined); setSummary(null); setView("edit"); }}
+          onManual={() => { setActiveBookId(null); save([]); setErr(undefined); setSummary(null); setView("edit"); }}
           onDone={(r) => { save(r.words); setSummary(r); setErr(r.words.length ? undefined : "단어를 찾지 못했어요. 직접 입력해 주세요."); setView("edit"); }} />
       )}
-      {view === "edit" && <Editor words={words} onChange={save} error={err} summary={summary} onBack={() => setView("home")} onStart={() => startQuiz(words)} />}
+      {view === "edit" && <Editor words={words} bookTitle={books.find((b) => b.id === activeBookId)?.title} onChange={save} error={err} summary={summary} onBack={() => setView("home")} onSave={saveCurrentBook} onStart={() => startQuiz(words)} />}
       {view === "quiz" && <Quiz key={quizSet.map((w) => w.id).join()} words={quizSet} onFinish={(s) => { setStats(s); setView("result"); }} />}
       {view === "result" && <Result words={quizSet} stats={stats} onRetryWrong={(w) => startQuiz(w)} onRetryAll={() => startQuiz(words)} onHome={() => setView("home")} />}
     </div>
@@ -152,7 +202,7 @@ function Header({ title, left }: { title: string; left?: React.ReactNode }) {
   );
 }
 
-function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string; onSample: () => void; onManual: () => void; onContinue: () => void }) {
+function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]; notice: string; onOpenBook: (b: Book) => void; onQuizBook: (b: Book) => void; onRenameBook: (b: Book) => void; onDeleteBook: (b: Book) => void; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string; onSample: () => void; onManual: () => void; onContinue: () => void }) {
   const cam = useRef<HTMLInputElement>(null);
   const lib = useRef<HTMLInputElement>(null);
   const json = useRef<HTMLInputElement>(null);
@@ -174,6 +224,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
       <input ref={cam} type="file" accept="image/*" capture="environment" hidden onChange={(e) => p.onFile(e.target.files?.[0])} />
       <input ref={lib} type="file" accept="image/*" hidden onChange={(e) => p.onFile(e.target.files?.[0])} />
       <input ref={json} type="file" accept=".json,application/json" hidden onChange={(e) => { p.onImport(e.target.files?.[0]); e.target.value = ""; }} />
+      {p.notice && <div role="status" className="rounded-xl bg-primary/10 p-3 font-semibold">{p.notice}</div>}
       {p.importError && <div role="alert" className="rounded-xl bg-warning/15 p-3 text-warning-foreground">{p.importError}</div>}
 
       {p.busy ? (
@@ -193,9 +244,37 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
             <button className="btn-soft h-14" onClick={p.onManual}>✏️ 직접 입력</button>
             <button className="btn-soft h-14" onClick={p.onSample}>📘 DAY 20 샘플</button>
           </div>
-          {p.saved > 0 && <button className="btn-ghost h-12" onClick={p.onContinue}>저장된 단어 {p.saved}개 이어서 하기 →</button>}
+          {p.saved > 0 && <button className="btn-ghost h-12" onClick={p.onContinue}>최근 작업 단어 {p.saved}개 이어서 편집 →</button>}
         </div>
       )}
+
+      <section className="card p-4">
+        <h2 className="mb-3 text-xl font-bold">📚 내 단어장 ({p.books.length})</h2>
+        {p.books.length === 0 ? (
+          <p className="py-4 text-center text-muted-foreground">아직 저장된 단어장이 없어요. JSON 파일을 가져와 보세요.</p>
+        ) : (
+          <ul className="space-y-3">
+            {p.books.map((book) => (
+              <li className="rounded-xl border border-border p-3" key={book.id}>
+                <div className="mb-2 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="break-words text-lg font-bold">{book.title}</p>
+                    <p className="text-sm text-muted-foreground">{book.words.length}개 단어 · {new Date(book.updatedAt).toLocaleDateString("ko-KR")} 수정</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button className="btn-primary h-12" onClick={() => p.onQuizBook(book)}>▶ 퀴즈 풀기</button>
+                  <button className="btn-soft h-12" onClick={() => p.onOpenBook(book)}>✏️ 단어 편집</button>
+                </div>
+                <div className="mt-2 flex justify-end gap-2 text-sm">
+                  <button className="min-h-10 rounded-lg px-3 text-muted-foreground" onClick={() => p.onRenameBook(book)}>이름 변경</button>
+                  <button className="min-h-10 rounded-lg px-3 text-destructive" onClick={() => p.onDeleteBook(book)}>삭제</button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
 
       {weakList.length > 0 && (
         <section className="card p-4">
@@ -227,7 +306,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; onFile: (f?: 
   );
 }
 
-function Editor({ words, onChange, error, summary, onBack, onStart }: { words: Word[]; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onStart: () => void }) {
+function Editor({ words, bookTitle, onChange, error, summary, onBack, onSave, onStart }: { words: Word[]; bookTitle?: string; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onSave: () => void; onStart: () => void }) {
   const unsure = words.filter((w) => w.uncertain).length;
   const valid = words.filter((w) => w.en.trim() && w.ko.trim()).length;
   const upd = (id: string, patch: Partial<Word>) => onChange(words.map((w) => (w.id === id ? { ...w, ...patch, uncertain: false } : w)));
@@ -242,7 +321,7 @@ function Editor({ words, onChange, error, summary, onBack, onStart }: { words: W
   }));
   return (
     <div>
-      <Header title="단어 확인" left={<button className="btn-ghost h-11 px-3" onClick={onBack}>‹ 처음</button>} />
+      <Header title={bookTitle ? `단어 확인 · ${bookTitle}` : "단어 확인"} left={<button className="btn-ghost h-11 px-3" onClick={onBack}>‹ 처음</button>} />
       {error && <div className="mb-3 rounded-2xl bg-warning/15 p-4 font-medium text-warning-foreground">{error}</div>}
       <div className="card mb-3 flex items-center justify-between p-4">
         {summary ? (
@@ -277,7 +356,10 @@ function Editor({ words, onChange, error, summary, onBack, onStart }: { words: W
       </ul>
       <button className="btn-soft mt-3 h-14 w-full" onClick={() => onChange([...words, { id: uid(), en: "", ko: "", senses: [{ pos: "", ko: "" }] }])}>+ 단어 추가</button>
       <div className="sticky bottom-0 -mx-4 mt-4 bg-background/90 px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-3 backdrop-blur">
-        <button className="btn-primary h-16 w-full text-xl" disabled={!valid} onClick={onStart}>퀴즈 시작 ({valid}개)</button>
+        <div className="grid grid-cols-2 gap-3">
+          <button className="btn-primary h-16 text-lg" disabled={!valid} onClick={onSave}>💾 단어장 저장</button>
+          <button className="btn-soft h-16 text-lg" disabled={!valid} onClick={onStart}>퀴즈 시작 ({valid}개)</button>
+        </div>
       </div>
     </div>
   );
