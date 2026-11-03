@@ -557,7 +557,7 @@ export async function recognizeVocab(file: Blob, rotation: number, expected: num
     // uncertain readings. Network/dictionary failure must never discard OCR rows.
     onStage({ label: "영한·한영 사전 교차검증 중", progress: 0.98 });
     const verified = await verifyAll(words.map((w) => ({
-      en: w.en, senses: w.senses ?? [], enConf: w.enConf, koConf: w.koConf,
+      en: w.en, senses: w.senses ?? [], enConf: w.enConf ?? 0, koConf: w.koConf ?? 0,
     })));
     const checked = words.map((w, i) => {
       const v = verified[i]!;

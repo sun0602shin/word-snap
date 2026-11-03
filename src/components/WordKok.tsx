@@ -3,6 +3,7 @@ import { POS_LIST, POS_LABEL, joinSenses, parseMeaning, type Sense } from "@/lib
 import { withSenses, normalize, sampleWords, shuffle, store, uid, parseFile, type Book, type Session, type Weak, type Word } from "@/lib/wordkok";
 import { recognizeVocab, warmUp, type OcrResult, type OcrStage } from "@/lib/ocr";
 import { applyFix } from "@/lib/dict";
+import { cancelSpeech, getAutoSpeak, initVoices, setAutoSpeak, speak } from "@/lib/speech";
 
 type Stat = { wrong: number; solved: boolean };
 type View = "home" | "photo" | "edit" | "quiz" | "result";
@@ -202,7 +203,7 @@ function Header({ title, left }: { title: string; left?: React.ReactNode }) {
   );
 }
 
-function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]; notice: string; onOpenBook: (b: Book) => void; onQuizBook: (b: Book) => void; onRenameBook: (b: Book) => void; onDeleteBook: (b: Book) => void; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string; onSample: () => void; onManual: () => void; onContinue: () => void }) {
+function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]; notice: string; onOpenBook: (b: Book) => void; onQuizBook: (b: Book) => void; onRenameBook: (b: Book) => void; onDeleteBook: (b: Book) => void; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string | undefined; onSample: () => void; onManual: () => void; onContinue: () => void }) {
   const cam = useRef<HTMLInputElement>(null);
   const lib = useRef<HTMLInputElement>(null);
   const json = useRef<HTMLInputElement>(null);
@@ -306,7 +307,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]
   );
 }
 
-function Editor({ words, bookTitle, onChange, error, summary, onBack, onSave, onStart }: { words: Word[]; bookTitle?: string; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onSave: () => void; onStart: () => void }) {
+function Editor({ words, bookTitle, onChange, error, summary, onBack, onSave, onStart }: { words: Word[]; bookTitle?: string | undefined; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onSave: () => void; onStart: () => void }) {
   const unsure = words.filter((w) => w.uncertain).length;
   const valid = words.filter((w) => w.en.trim() && w.ko.trim()).length;
   const upd = (id: string, patch: Partial<Word>) => onChange(words.map((w) => (w.id === id ? { ...w, ...patch, uncertain: false } : w)));
@@ -401,27 +402,43 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
   const [stats, setStats] = useState<Record<string, Stat>>(() => Object.fromEntries(words.map((w) => [w.id, { wrong: 0, solved: false }])));
   const [answer, setAnswer] = useState("");
   const [fb, setFb] = useState<null | { ok: boolean }>(null);
+  const [auto, setAuto] = useState(true);
+  const [ttsErr, setTtsErr] = useState(false);
+  const graded = useRef(false);
   const input = useRef<HTMLInputElement>(null);
   const nextBtn = useRef<HTMLButtonElement>(null);
   const cur = byId[queue[0]!]!;
   const solved = Object.values(stats).filter((s) => s.solved).length;
 
+  useEffect(() => { setAuto(getAutoSpeak()); initVoices(); return () => cancelSpeech(); }, []);
   useEffect(() => { (fb ? nextBtn : input).current?.focus(); }, [fb, queue]);
 
+  function say() {
+    setTtsErr(false);
+    if (!speak(cur.en, () => setTtsErr(true))) setTtsErr(true);
+  }
   function submit(e: React.FormEvent) {
     e.preventDefault();
     if (fb) return next();
-    if (!answer.trim()) return;
+    if (!answer.trim() || graded.current) return;
+    graded.current = true;
     const ok = normalize(answer) === normalize(cur.en);
     setStats((s) => ({ ...s, [cur.id]: ok ? { wrong: s[cur.id]!.wrong, solved: true } : { solved: false, wrong: s[cur.id]!.wrong + 1 } }));
     setFb({ ok });
+    // Speak inside the same submit gesture so iOS Safari allows playback.
+    if (auto) say(); else setTtsErr(false);
   }
   function next() {
+    cancelSpeech(); setTtsErr(false);
     const [head, ...rest] = queue;
     const nq = fb?.ok ? rest : [...rest, head!];
-    setFb(null); setAnswer("");
+    setFb(null); setAnswer(""); graded.current = false;
     if (!nq.length) return onFinish(stats);
     setQueue(nq);
+  }
+  function toggleAuto() {
+    const v = !auto; setAuto(v); setAutoSpeak(v);
+    if (!v) cancelSpeech();
   }
 
   return (
@@ -433,7 +450,10 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
             <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${(solved / words.length) * 100}%` }} />
           </div>
         </div>
-        <button type="button" className="btn-ghost h-11 px-4" onClick={() => onFinish(stats)}>마치기</button>
+        <button type="button" aria-pressed={auto} aria-label="자동 발음" className="btn-ghost h-11 px-3 text-sm" onClick={toggleAuto}>
+          {auto ? "🔊 자동 발음 ON" : "🔇 자동 발음 OFF"}
+        </button>
+        <button type="button" className="btn-ghost h-11 px-4" onClick={() => { cancelSpeech(); onFinish(stats); }}>마치기</button>
       </div>
 
       <div className="card flex min-h-56 flex-col items-center justify-center p-6 text-center">
@@ -449,6 +469,8 @@ function Quiz({ words, onFinish }: { words: Word[]; onFinish: (s: Record<string,
         <div className={`mt-3 rounded-2xl p-4 text-center ${fb.ok ? "bg-success/15" : "bg-destructive/10"}`}>
           <p className={`text-xl font-bold ${fb.ok ? "text-success" : "text-destructive"}`}>{fb.ok ? "정답! 🎉" : "아쉬워요"}</p>
           <p className="mt-1 text-lg">정답: <b className="tracking-wide">{cur.en}</b></p>
+          <button type="button" className="btn-ghost mt-2 h-12 px-5 text-lg" onClick={say}>🔊 다시 듣기</button>
+          {ttsErr && <p className="mt-1 text-sm text-muted-foreground">발음을 재생하지 못했어요. 🔊 다시 듣기를 눌러 보세요.</p>}
           {!fb.ok && <p className="text-sm text-muted-foreground">이 단어는 뒤에서 다시 나와요</p>}
         </div>
       )}
