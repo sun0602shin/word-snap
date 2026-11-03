@@ -203,7 +203,7 @@ function Header({ title, left }: { title: string; left?: React.ReactNode }) {
   );
 }
 
-function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]; notice: string; onOpenBook: (b: Book) => void; onQuizBook: (b: Book) => void; onRenameBook: (b: Book) => void; onDeleteBook: (b: Book) => void; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string; onSample: () => void; onManual: () => void; onContinue: () => void }) {
+function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]; notice: string; onOpenBook: (b: Book) => void; onQuizBook: (b: Book) => void; onRenameBook: (b: Book) => void; onDeleteBook: (b: Book) => void; onFile: (f?: File) => void; onImport: (f?: File) => void; importError?: string | undefined; onSample: () => void; onManual: () => void; onContinue: () => void }) {
   const cam = useRef<HTMLInputElement>(null);
   const lib = useRef<HTMLInputElement>(null);
   const json = useRef<HTMLInputElement>(null);
@@ -307,7 +307,7 @@ function Home(p: { busy: boolean; progress: number; saved: number; books: Book[]
   );
 }
 
-function Editor({ words, bookTitle, onChange, error, summary, onBack, onSave, onStart }: { words: Word[]; bookTitle?: string; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onSave: () => void; onStart: () => void }) {
+function Editor({ words, bookTitle, onChange, error, summary, onBack, onSave, onStart }: { words: Word[]; bookTitle?: string | undefined; onChange: (w: Word[]) => void; error?: string | undefined; summary: { expected: number; recognized: number; low: number } | null; onBack: () => void; onSave: () => void; onStart: () => void }) {
   const unsure = words.filter((w) => w.uncertain).length;
   const valid = words.filter((w) => w.en.trim() && w.ko.trim()).length;
   const upd = (id: string, patch: Partial<Word>) => onChange(words.map((w) => (w.id === id ? { ...w, ...patch, uncertain: false } : w)));

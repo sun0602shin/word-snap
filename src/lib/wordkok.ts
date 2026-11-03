@@ -3,7 +3,7 @@ import type { Fix } from "./dict";
 
 export type Word = {
   id: string; en: string; ko: string; senses?: Sense[]; uncertain?: boolean; crop?: string;
-  enConf?: number; koConf?: number; posAuto?: boolean; fixes?: Fix[]; dict?: "ok" | "fixed" | "unknown";
+  enConf?: number; koConf?: number; posAuto?: boolean; fixes?: Fix[] | undefined; dict?: "ok" | "fixed" | "unknown";
 };
 
 /** Ensure senses exist and ko is the POS-free meaning text. */
